@@ -1,0 +1,9 @@
+numpy
+pandas
+matplotlib
+seaborn
+Pillow
+tensorflow
+scikit-learn
+python-dotenv
+pytest
