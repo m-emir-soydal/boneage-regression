@@ -2,6 +2,17 @@
 *****************************************************
 * Author: Nadide Bilge Dogan                        *
 * Date: 17/06/2026                                  *
+* Version: 1.2.0                                    *
+* Branch: bilge                                     *
+* Development:                                      *
+* - Some bugs fixed.                                *
+* - Gender information embedded with 32 Dense layer.*
+*****************************************************
+"""
+"""
+*****************************************************
+* Author: Nadide Bilge Dogan                        *
+* Date: 17/06/2026                                  *
 * Version: 1.1.0                                    *
 * Branch: bilge                                     *
 * Development:                                      *

@@ -164,11 +164,11 @@ def main():
     except ImportError:
         print("matplotlib or seaborn not installed, skipping plot generation.")
 
-    evaluate_and_save_metrics(model, val_loader, val_df, max_age, run_name=run_name, set_name="val", device=device)
+    evaluate_and_save_metrics(model, val_loader, val_df, max_age, run_name=run_name, split="val", device=device)
     
     print("\nRunning evaluation on test set...")
     test_loader = build_val_or_test_loader(test_df)
-    evaluate_and_save_metrics(model, test_loader, test_df, max_age, run_name=run_name, set_name="test", device=device)
+    evaluate_and_save_metrics(model, test_loader, test_df, max_age, run_name=run_name, split="test", device=device)
     
     print("Training process completed.")
 

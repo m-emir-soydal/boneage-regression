@@ -132,3 +132,21 @@ def build_datasets(train_df, val_df, batch_size=BATCH_SIZE):
                             num_workers=8, pin_memory=True)
                             
     return train_loader, val_loader
+
+
+def build_val_or_test_loader(df, batch_size=BATCH_SIZE):
+    """
+    Converts a single DataFrame (validation, calibration, or test) into a
+    torch DataLoader with eval-time transforms and no shuffling.
+    """
+    eval_transform = transforms.Compose([
+        transforms.Resize(IMG_SIZE),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
+    ds = BoneAgeDataset(df, transform=eval_transform)
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False,
+                        num_workers=8, pin_memory=True)
+
+    return loader

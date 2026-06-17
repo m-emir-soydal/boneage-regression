@@ -16,8 +16,11 @@ class MultiInputModel(nn.Module):
         # Remove the classifier so base_model returns features
         self.base_model.classifier = nn.Identity()
         
-        # Build the new head: feature + 1 (for sex_input)
-        self.fc1 = nn.Linear(num_ftrs + 1, 256)
+        # Dense layer for sex input
+        self.sex_fc = nn.Linear(1, 32)
+
+        # Build the new head: feature + 32 (for processed sex_input)
+        self.fc1 = nn.Linear(num_ftrs + 32, 256)
         self.dropout = nn.Dropout(dropout)
         self.relu = nn.ReLU()
         self.out = nn.Linear(256, 1)
@@ -25,8 +28,11 @@ class MultiInputModel(nn.Module):
     def forward(self, img, sex):
         # Extract features (B, num_ftrs)
         feat = self.base_model(img)
-        
-        # Concatenate features with sex
+
+        # Process sex through dense layer
+        sex = self.relu(self.sex_fc(sex))
+
+        # Concatenate features with processed sex
         x = torch.cat((feat, sex), dim=1)
         
         # FC layers
