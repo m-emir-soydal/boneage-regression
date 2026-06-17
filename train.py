@@ -50,7 +50,8 @@ def main():
     model = build_multi_input_model()
     model = model.to(device)
     
-    criterion = nn.L1Loss() # Mean Absolute Error
+    criterion = nn.SmoothL1Loss() # Huber / smooth L1 for training
+    mae_metric = nn.L1Loss()      # MAE for monitoring / checkpointing
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-6, verbose=True
@@ -98,7 +99,7 @@ def main():
                 targets = targets.to(device)
                 
                 outputs = model(img, sex)
-                loss = criterion(outputs, targets)
+                loss = mae_metric(outputs, targets)
                 val_loss += loss.item() * img.size(0)
                 
         val_loss /= len(val_loader.dataset)
@@ -148,11 +149,11 @@ def main():
         
         plt.figure(figsize=(10, 6))
         epochs_range = range(1, len(history['loss']) + 1)
-        plt.plot(epochs_range, history['loss'], label='Train Loss (MAE)', marker='o', linewidth=2)
+        plt.plot(epochs_range, history['loss'], label='Train Loss (Huber)', marker='o', linewidth=2)
         plt.plot(epochs_range, history['val_loss'], label='Val Loss (MAE)', marker='s', linewidth=2)
         plt.title('Training and Validation Loss', fontsize=14)
         plt.xlabel('Epochs', fontsize=12)
-        plt.ylabel('Loss (MAE)', fontsize=12)
+        plt.ylabel('Loss', fontsize=12)
         plt.legend(fontsize=12)
         plt.grid(True, linestyle='--', alpha=0.7)
         

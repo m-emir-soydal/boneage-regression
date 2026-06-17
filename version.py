@@ -2,6 +2,16 @@
 *****************************************************
 * Author: Nadide Bilge Dogan                        *
 * Date: 17/06/2026                                  *
+* Version: 1.3.0                                    *
+* Branch: bilge                                     *
+* Development:                                      *
+* - Train loss function changed to Huber.           *
+*****************************************************
+"""
+"""
+*****************************************************
+* Author: Nadide Bilge Dogan                        *
+* Date: 17/06/2026                                  *
 * Version: 1.2.0                                    *
 * Branch: bilge                                     *
 * Development:                                      *
