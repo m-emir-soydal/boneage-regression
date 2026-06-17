@@ -3,7 +3,9 @@ pandas
 matplotlib
 seaborn
 Pillow
-tensorflow
+torch
+torchvision
+tqdm
 scikit-learn
 python-dotenv
 pytest

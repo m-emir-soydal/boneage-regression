@@ -1,18 +1,30 @@
+import torch
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from datetime import datetime
 from config import OUTPUT_DIR
 
-def evaluate_and_save_metrics(model, ds_val, val_df, max_age, run_name="run"):
+def evaluate_and_save_metrics(model, val_loader, val_df, max_age, run_name="run", device="cpu", split="val"):
     """
-    Evaluates the model on the validation dataset, de-normalizes predictions,
+    Evaluates the PyTorch model on the given dataset, de-normalizes predictions,
     calculates metrics (MAE, RMSE, MSE, R2, accuracy), and saves them to CSV.
+    `split` labels the set (e.g. "val" or "test") in prints and output filenames.
     """
-    print(f"\n[{run_name}] Evaluating model on validation set...")
+    print(f"\n[{run_name}] Evaluating model on {split} set...")
+    model.eval()
     
-    # Get predictions
-    y_norm_pred = model.predict(ds_val, verbose=1).flatten()
+    preds = []
+    with torch.no_grad():
+        for batch in val_loader:
+            inputs, _ = batch
+            img = inputs['image_input'].to(device)
+            sex = inputs['sex_input'].to(device)
+            out = model(img, sex)
+            preds.append(out.cpu().numpy())
+            
+    # Flatten the list of batch predictions
+    y_norm_pred = np.vstack(preds).flatten()
     
     # De-normalize
     y_pred = y_norm_pred * max_age
@@ -26,7 +38,7 @@ def evaluate_and_save_metrics(model, ds_val, val_df, max_age, run_name="run"):
     acc6  = np.mean(np.abs(y_pred - y_true) <= 6.0)  * 100
     acc12 = np.mean(np.abs(y_pred - y_true) <= 12.0) * 100
 
-    print("\n--- Validation Metrics ---")
+    print(f"\n--- {split.capitalize()} Metrics ---")
     print(f"MAE:             {mae:.2f} months")
     print(f"RMSE:            {rmse:.2f} months")
     print(f"MSE:             {mse:.2f}")
@@ -37,6 +49,10 @@ def evaluate_and_save_metrics(model, ds_val, val_df, max_age, run_name="run"):
 
     # Generate timestamp
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # All outputs for this run live under OUTPUT_DIR/<run_name>/
+    run_dir = OUTPUT_DIR / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
     
     # Save Predictions DataFrame
     predictions_df = pd.DataFrame({
@@ -47,7 +63,7 @@ def evaluate_and_save_metrics(model, ds_val, val_df, max_age, run_name="run"):
     })
     predictions_df["abs_error"] = (predictions_df["pred_age"] - predictions_df["true_age"]).abs()
     
-    pred_path = OUTPUT_DIR / f"{run_name}_val_predictions_{ts}.csv"
+    pred_path = run_dir / f"{run_name}_{split}_predictions_{ts}.csv"
     predictions_df.to_csv(pred_path, index=False)
     print(f"Saved predictions to: {pred_path} ({len(predictions_df)} rows)")
 
@@ -64,7 +80,7 @@ def evaluate_and_save_metrics(model, ds_val, val_df, max_age, run_name="run"):
         "timestamp":      ts,
     }])
     
-    metrics_path = OUTPUT_DIR / f"{run_name}_val_metrics_{ts}.csv"
+    metrics_path = run_dir / f"{run_name}_{split}_metrics_{ts}.csv"
     metrics_df.to_csv(metrics_path, index=False)
     print(f"Saved metrics to:     {metrics_path}")
     

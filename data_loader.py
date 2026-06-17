@@ -1,98 +1,134 @@
 import pandas as pd
-import tensorflow as tf
-from tensorflow.keras.applications.efficientnet import preprocess_input as effnet_preprocess
+import torch
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+from PIL import Image
+from pathlib import Path
 from sklearn.model_selection import train_test_split
 from config import DATA_DIR, IMG_SIZE, BATCH_SIZE, RANDOM_STATE
 
-def parse_multi(filepath, sex, age):
-    """
-    Parses the image, normalizes, and packages features for the multi-input model.
-    """
-    # Load & preprocess image
-    img = tf.io.read_file(filepath)
-    img = tf.image.decode_png(img, channels=3)
-    img = tf.image.resize(img, IMG_SIZE)
-    img = effnet_preprocess(img)
+class BoneAgeDataset(Dataset):
+    def __init__(self, df, transform=None):
+        self.df = df
+        self.transform = transform
+        
+        self.filepaths = df['filepath'].values
+        self.sex_norm = df['sex_norm'].values.astype('float32')
+        self.boneage_norm = df['boneage_norm'].values.astype('float32')
 
-    # Cast numeric inputs
-    sex = tf.cast(sex, tf.float32)
-    age = tf.cast(age, tf.float32)
+    def __len__(self):
+        return len(self.df)
 
-    return (
-        {'image_input': img, 'sex_input': tf.expand_dims(sex, -1)},
-        tf.expand_dims(age, -1)
+    def __getitem__(self, idx):
+        path = self.filepaths[idx]
+        img = Image.open(path).convert('RGB')
+        
+        if self.transform:
+            img = self.transform(img)
+            
+        sex = torch.tensor([self.sex_norm[idx]], dtype=torch.float32)
+        age = torch.tensor([self.boneage_norm[idx]], dtype=torch.float32)
+        
+        return {'image_input': img, 'sex_input': sex}, age
+
+
+def _normalize_male(series):
+    """Coerce True/False, 'True'/'FALSE', 1/0 -> bool."""
+    if series.dtype == bool:
+        return series
+    return series.astype(str).str.strip().str.lower().map(
+        {"true": True, "false": False, "1": True, "0": False}
     )
+
+
+def _read_source(csv_path, id_col, age_col, male_col, img_dir):
+    """Read a source csv, unify schema to id,boneage,male,filepath; drop missing imgs."""
+    if not csv_path.exists():
+        raise FileNotFoundError(f"CSV not found at: {csv_path}")
+
+    df = pd.read_csv(csv_path)
+    out = pd.DataFrame({
+        "id": df[id_col].astype(int),
+        "boneage": df[age_col].astype(int),
+        "male": _normalize_male(df[male_col]),
+    })
+    out["filepath"] = out["id"].apply(
+        lambda x: str(DATA_DIR / img_dir / f"{x}.png")
+    )
+
+    exists = out["filepath"].apply(lambda p: Path(p).exists())
+    missing = int((~exists).sum())
+    if missing:
+        print(f"  warning: {missing} rows dropped (image not found) from {csv_path.name}")
+    return out[exists].reset_index(drop=True)
+
+
+def _add_norm_cols(df, max_age):
+    df = df.copy()
+    df["boneage_norm"] = df["boneage"] / max_age
+    df["sex_norm"] = df["male"].astype("float32")
+    return df
+
 
 def load_data(sample_frac=1.0):
     """
-    Loads train.csv, handles paths and normalizations, and returns
-    dataframes and max_age for denormalization later.
-    
-    Args:
-        sample_frac: Fraction of data to use (e.g. 0.01 for quick test)
+    Loads the source train.csv + val.csv, unifies their schema, and splits
+    the source training data 50/25/25 into train/val/calibration. The source
+    validation set is used as the held-out TEST set.
     """
-    csv_path = DATA_DIR / "train.csv"
-    if not csv_path.exists():
-        raise FileNotFoundError(f"Training CSV not found at: {csv_path}")
-        
-    train_df = pd.read_csv(csv_path)
-    
-    if sample_frac < 1.0:
-        train_df = train_df.sample(frac=sample_frac, random_state=RANDOM_STATE)
-    
-    # Add the image file path column
-    train_df['filepath'] = train_df['id'].astype(str).apply(lambda x: str(DATA_DIR / f"{x}.png"))
-
-    # Split off 20% for validation (stratified by sex)
-    train_split, val_split = train_test_split(
-        train_df,
-        test_size=0.2,
-        random_state=RANDOM_STATE,
-        stratify=train_df['male']
+    train_full = _read_source(DATA_DIR / "train.csv", "id", "boneage", "male", "train")
+    test_df = _read_source(
+        DATA_DIR / "val.csv", "Image ID", "Bone Age (months)", "male", "val"
     )
 
-    # Normalize target column
-    max_age = train_split['boneage'].max()
-    train_split = train_split.copy()
-    val_split = val_split.copy()
-    
-    train_split['boneage_norm'] = train_split['boneage'] / max_age
-    val_split['boneage_norm'] = val_split['boneage'] / max_age
-    
-    train_split['sex_norm'] = train_split['male'].astype('float32')
-    val_split['sex_norm'] = val_split['male'].astype('float32')
+    if sample_frac < 1.0:
+        train_full = train_full.sample(frac=sample_frac, random_state=RANDOM_STATE)
 
-    return train_split, val_split, max_age
+    # 50 / 25 / 25 split, stratified by sex.
+    train_df, temp_df = train_test_split(
+        train_full,
+        test_size=0.5,
+        random_state=RANDOM_STATE,
+        stratify=train_full["male"],
+    )
+    val_df, calib_df = train_test_split(
+        temp_df,
+        test_size=0.5,
+        random_state=RANDOM_STATE,
+        stratify=temp_df["male"],
+    )
+
+    # Normalize targets against the training split only.
+    max_age = train_df["boneage"].max()
+    train_df = _add_norm_cols(train_df, max_age)
+    val_df = _add_norm_cols(val_df, max_age)
+    calib_df = _add_norm_cols(calib_df, max_age)
+    test_df = _add_norm_cols(test_df, max_age)
+
+    return train_df, val_df, calib_df, test_df, max_age
 
 def build_datasets(train_df, val_df, batch_size=BATCH_SIZE):
     """
-    Converts pandas DataFrames into tf.data.Dataset objects for training.
+    Converts pandas DataFrames into torch DataLoaders.
     """
-    ds_train = tf.data.Dataset.from_tensor_slices((
-        train_df['filepath'].values,
-        train_df['sex_norm'].values,
-        train_df['boneage_norm'].values
-    ))
-    ds_train = (
-        ds_train
-          .map(parse_multi, num_parallel_calls=tf.data.AUTOTUNE)
-          .cache()
-          .shuffle(1024, seed=RANDOM_STATE)
-          .batch(batch_size)
-          .prefetch(tf.data.AUTOTUNE)
-    )
-
-    ds_val = tf.data.Dataset.from_tensor_slices((
-        val_df['filepath'].values,
-        val_df['sex_norm'].values,
-        val_df['boneage_norm'].values
-    ))
-    ds_val = (
-        ds_val
-          .map(parse_multi, num_parallel_calls=tf.data.AUTOTUNE)
-          .cache()
-          .batch(batch_size)
-          .prefetch(tf.data.AUTOTUNE)
-    )
+    train_transform = transforms.Compose([
+        transforms.Resize(IMG_SIZE),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
     
-    return ds_train, ds_val
+    val_transform = transforms.Compose([
+        transforms.Resize(IMG_SIZE),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    
+    train_ds = BoneAgeDataset(train_df, transform=train_transform)
+    val_ds = BoneAgeDataset(val_df, transform=val_transform)
+    
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, 
+                              num_workers=8, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, 
+                            num_workers=8, pin_memory=True)
+                            
+    return train_loader, val_loader

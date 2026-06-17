@@ -59,6 +59,8 @@ To verify everything works correctly on a very small subset of data (1% sample, 
 ```bash
 chmod +x run_training.sh
 ./run_training.sh --quick-test --output-name smoke_test
+
+python test.py --checkpoint <path.pth> --output-name run_v1
 ```
 
 ### Full Training
