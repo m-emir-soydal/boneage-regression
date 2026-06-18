@@ -6,6 +6,7 @@
 CONDA_ENV="uq"
 QUICK_TEST=0
 OUTPUT_NAME="run"
+SEED=123
 
 # Parse arguments
 while [[ "$#" -gt 0 ]]; do
@@ -13,6 +14,7 @@ while [[ "$#" -gt 0 ]]; do
         --quick-test) QUICK_TEST=1; shift ;;
         --output-name) OUTPUT_NAME="$2"; shift 2 ;;
         --env) CONDA_ENV="$2"; shift 2 ;;
+        --seed) SEED="$2"; shift 2 ;;
         *) echo "Unknown parameter passed: $1"; exit 1 ;;
     esac
 done
@@ -29,7 +31,7 @@ if [ $? -ne 0 ]; then
 fi
 
 # Build python command
-PYTHON_CMD="python train.py --output-name $OUTPUT_NAME"
+PYTHON_CMD="python train.py --output-name $OUTPUT_NAME --seed $SEED"
 if [ "$QUICK_TEST" -eq 1 ]; then
     PYTHON_CMD="$PYTHON_CMD --quick-test"
 fi

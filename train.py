@@ -58,8 +58,8 @@ def main():
     )
 
     best_val_mae = float('inf')
-    early_stop_patience = 5
-    early_stop_counter = 0
+    #early_stop_patience = 5
+    #early_stop_counter = 0
     history = {'loss': [], 'val_loss': [], 'val_mae': []}
     
     checkpoint_path = None
@@ -124,12 +124,12 @@ def main():
                 
             checkpoint_path = new_checkpoint_path
             torch.save(model.state_dict(), checkpoint_path)
-            early_stop_counter = 0
-        else:
-            early_stop_counter += 1
-            if early_stop_counter >= early_stop_patience:
-                print(f"Early stopping triggered after {epoch+1} epochs.")
-                break
+        #     early_stop_counter = 0
+        # else:
+        #     early_stop_counter += 1
+        #     if early_stop_counter >= early_stop_patience:
+        #         print(f"Early stopping triggered after {epoch+1} epochs.")
+        #         break
             
     # Load best weights for evaluation
     if checkpoint_path and checkpoint_path.exists():

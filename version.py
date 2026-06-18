@@ -2,6 +2,16 @@
 *****************************************************
 * Author: Nadide Bilge Dogan                        *
 * Date: 18/06/2026                                  *
+* Version: 1.6.0                                    *
+* Branch: bilge                                     *
+* Development:                                      *
+* - Early stopping removed.                         *
+*****************************************************
+"""
+"""
+*****************************************************
+* Author: Nadide Bilge Dogan                        *
+* Date: 18/06/2026                                  *
 * Version: 1.5.0                                    *
 * Branch: bilge                                     *
 * Development:                                      *
