@@ -14,7 +14,7 @@ from metrics import evaluate_and_save_metrics
 def main():
     parser = argparse.ArgumentParser(description="Train Multi-Input Bone Age Model with PyTorch")
     parser.add_argument("--quick-test", action="store_true", help="Run a quick test with 1% of data and 2 epochs")
-    parser.add_argument("--epochs", type=int, default=80, help="Number of epochs to train")
+    parser.add_argument("--epochs", type=int, default=50, help="Number of epochs to train")
     parser.add_argument("--output-name", type=str, default="run", help="Prefix for output files")
     parser.add_argument("--seed", type=int, default=42, help="Torch init/training seed (data split stays fixed)")
     args = parser.parse_args()
@@ -58,7 +58,7 @@ def main():
     )
 
     best_val_mae = float('inf')
-    early_stop_patience = 10
+    early_stop_patience = 5
     early_stop_counter = 0
     history = {'loss': [], 'val_loss': [], 'val_mae': []}
     

@@ -2,6 +2,17 @@
 *****************************************************
 * Author: Nadide Bilge Dogan                        *
 * Date: 18/06/2026                                  *
+* Version: 1.5.0                                    *
+* Branch: bilge                                     *
+* Development:                                      *
+* - Epoch size changed to 50.                       *
+* - Early stopping step set to 5.                   *
+*****************************************************
+"""
+"""
+*****************************************************
+* Author: Nadide Bilge Dogan                        *
+* Date: 18/06/2026                                  *
 * Version: 1.4.0                                    *
 * Branch: bilge                                     *
 * Development:                                      *
