@@ -54,7 +54,7 @@ def main():
     mae_metric = nn.L1Loss()      # MAE for monitoring / checkpointing
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-6, verbose=True
+        optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-6
     )
 
     best_val_mae = float('inf')

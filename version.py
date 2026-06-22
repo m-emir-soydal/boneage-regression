@@ -1,5 +1,16 @@
 """
 *****************************************************
+* Author: Fuat Işıklan                              *
+* Date: 22/06/2026                                  *
+* Version: cp-1.0.0                                    *
+* Branch: fuat                                      *
+* Development:                                      *
+* - Implementing CP with bilge 1.6.0 
+* - SCP, KNN CP, AS-MCP, BCP implemented                        *
+*****************************************************
+"""
+"""
+*****************************************************
 * Author: Nadide Bilge Dogan                        *
 * Date: 18/06/2026                                  *
 * Version: 1.6.0                                    *
