@@ -28,9 +28,11 @@ UQ/
 ├── common/                    # shared helpers reused by every method
 │   ├── paths.py               # puts project root on sys.path; results dirs
 │   ├── uq_metrics.py          # PICP@90/95, MPIW@90/95 + point metrics
-│   └── inference.py           # enable_dropout, gaussian_intervals, denormalize
+│   ├── inference.py           # enable_dropout, gaussian_intervals, denormalize
+│   └── calibration.py         # post-hoc std temperature (fit/apply/save/load)
 ├── mc_dropout/
-│   └── run_mc_dropout.py      # MC Dropout entry point
+│   ├── run_mc_dropout.py      # MC Dropout evaluation (+ post-hoc calibration)
+│   └── train_mc_dropout.py    # UQ-aware training loop (calibration-aware)
 └── results/
     ├── mc_dropout/            # grouped CSV outputs for this method
     └── comparison_<ts>.csv    # cross-method comparison table
@@ -88,16 +90,91 @@ Arguments:
 - `--split` (default `test`): one of `train` / `val` / `calib` / `test`. The
   same deterministic split as training is reproduced.
 - `--output-name` (default `mc_dropout`): output file prefix.
+- `--fit-calibration`: fit a post-hoc std temperature on **this** split (use
+  with `--split calib`) and save it for later reuse. See below.
+- `--calibration PATH|auto`: apply a previously saved temperature before
+  building intervals (`auto` picks the most recent one).
+
+### Countering low coverage: post-hoc calibration
+
+Raw MC Dropout intervals here **under-cover** (PICP@90 ≈ 0.79 instead of 0.90)
+because the single head-dropout layer produces a `std` that is too small. The
+cheapest fix is **temperature scaling**: learn one scalar `s` on the held-out
+`calib` split so that `mean ± z * (s * std)` reaches the nominal coverage, then
+apply that same `s` to the test split.
+
+`s` is the maximum-likelihood Gaussian scale of the standardized residuals,
+`s = sqrt(mean(((y - mean) / std)^2))` (computed in months). `s = 1` means the
+raw std already matched the residuals; `s > 1` widens the intervals.
+
+```bash
+# 1. Fit the temperature on the calibration split (saves a JSON under
+#    UQ/results/mc_dropout/calibration_<ts>.json)
+python -m UQ.mc_dropout.run_mc_dropout \
+    --checkpoint outputs/<run>/best_*.pth --split calib --fit-calibration
+
+# 2. Evaluate the test split with that temperature applied
+python -m UQ.mc_dropout.run_mc_dropout \
+    --checkpoint outputs/<run>/best_*.pth --split test --calibration auto
+```
+
+The metrics row records `std_scale` and `calibrated` so calibrated and
+uncalibrated runs are distinguishable in `compare.py`.
 
 ### Outputs
 
 Written to `UQ/results/mc_dropout/`:
 
 - `mc_dropout_<split>_predictions_<timestamp>.csv`
-  columns: `id, sex, true_age, pred_mean, pred_std, lower90, upper90,
-  lower95, upper95, covered90, covered95`
+  columns: `id, sex, true_age, pred_mean, pred_std, std_scale, lower90,
+  upper90, lower95, upper95, covered90, covered95` (intervals reflect the
+  applied `std_scale`; `pred_std` is the raw dropout std)
+- `calibration_<timestamp>.json` (when `--fit-calibration` is used): the saved
+  std temperature plus metadata, reusable via `--calibration`
 - `mc_dropout_<split>_metrics_<timestamp>.csv`
   one comparison row (see schema below).
+
+### UQ-aware training (Option 1)
+
+Post-hoc calibration pins coverage to the nominal level, but it cannot make the
+intervals *tighter* — that is decided at training time. `train_mc_dropout.py` is
+a sibling of the base `train.py` that trains the **same** model while optimizing
+for uncertainty quality:
+
+- `--dropout` is configurable (the base trainer hard-codes 0.5), since MC
+  variance is driven entirely by the head dropout layer.
+- After each epoch it runs MC Dropout on the `calib` split, fits the temperature
+  above, and scores the epoch by the **calibrated** interval quality instead of
+  plain val MAE. Because calibration already fixes coverage, the default
+  `combo` criterion minimizes calibrated `MPIW@90` (tighter intervals) plus a
+  small MAE penalty so point accuracy does not regress.
+
+```bash
+python -m UQ.mc_dropout.train_mc_dropout \
+    --output-name uqtrain --dropout 0.5 --epochs 50 \
+    --select-by combo --mc-eval-samples 10 --mc-eval-every 1
+```
+
+Key arguments:
+
+- `--select-by` (default `combo`): `val_mae` (base behavior), `picp90`
+  (minimize `|PICP@90 - 0.90|`), `mpiw90` (tightest calibrated intervals), or
+  `combo` (`MPIW@90 + mae_weight * MAE`).
+- `--mae-weight` (default 0.01): weight on calib MAE (months) in `combo`.
+- `--mc-eval-samples` (default 10): MC passes for the per-epoch calib eval
+  (kept small for speed; the final calibration uses `--final-samples`, 30).
+- `--mc-eval-every` (default 1): run the (expensive) MC calib eval every k
+  epochs.
+
+On completion it restores the best checkpoint, fits the definitive temperature
+on `calib`, and writes it to `UQ/results/mc_dropout/` so the evaluation step
+below can reuse it with `--calibration auto`:
+
+```bash
+python -m UQ.mc_dropout.run_mc_dropout \
+    --checkpoint outputs/uqtrain_seed42/best_*.pth \
+    --split test --calibration auto
+```
 
 ## Comparing methods
 
@@ -124,8 +201,8 @@ PICP_90, PICP_95, MPIW_90, MPIW_95, n, <method-specific extras>, timestamp
 ```
 
 `<method-specific extras>` are optional (for MC Dropout: `samples`,
-`checkpoint`). A future `UQ/compare.py` can simply concatenate every
-`UQ/results/*/*_metrics_*.csv` into a single table.
+`checkpoint`, `std_scale`, `calibrated`). A future `UQ/compare.py` can simply
+concatenate every `UQ/results/*/*_metrics_*.csv` into a single table.
 
 ## Adding a new UQ method
 

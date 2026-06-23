@@ -37,6 +37,12 @@ from common.inference import (  # noqa: E402
     mc_forward_passes,
 )
 from common.uq_metrics import summarize  # noqa: E402
+from common.calibration import (  # noqa: E402
+    fit_temperature,
+    apply_temperature,
+    save_calibration,
+    resolve_calibration,
+)
 
 ensure_project_on_path()
 
@@ -71,6 +77,13 @@ def main():
                         help="Which data split to evaluate on")
     parser.add_argument("--output-name", type=str, default=METHOD_NAME,
                         help="Prefix for output files")
+    parser.add_argument("--fit-calibration", action="store_true",
+                        help="Fit a post-hoc std temperature on THIS split "
+                             "(run with --split calib) and save it for reuse")
+    parser.add_argument("--calibration", type=str, default=None,
+                        help="Apply a saved std temperature before building "
+                             "intervals: a path to a calibration JSON or "
+                             "'auto' to use the most recent one")
     args = parser.parse_args()
 
     print("Loading data...")
@@ -105,14 +118,47 @@ def main():
     # any ambiguity in target ordering.
     y_true = df["boneage_norm"].values * max_age
 
-    lower90, upper90 = gaussian_intervals(pred_mean, pred_std, 90)
-    lower95, upper95 = gaussian_intervals(pred_mean, pred_std, 95)
+    out_dir = method_results_dir(METHOD_NAME)
+
+    # Apply a previously-fitted temperature (widens/tightens the raw dropout
+    # std so the intervals actually reach their nominal coverage).
+    std_scale = 1.0
+    if args.calibration:
+        payload, cal_path = resolve_calibration(args.calibration, out_dir)
+        std_scale = float(payload["std_scale"])
+        print(f"Applying calibration temperature {std_scale:.4f} from {cal_path}")
+    std_eff = apply_temperature(pred_std, std_scale)
+
+    lower90, upper90 = gaussian_intervals(pred_mean, std_eff, 90)
+    lower95, upper95 = gaussian_intervals(pred_mean, std_eff, 95)
+
+    # Fit a fresh temperature on this split (intended for --split calib). This
+    # is fit on the RAW std so the saved scale is independent of any already
+    # applied calibration.
+    if args.fit_calibration:
+        fitted_scale = fit_temperature(y_true, pred_mean, pred_std)
+        cal_path = save_calibration(
+            out_dir, fitted_scale, split=args.split, n=len(df),
+            extra={
+                "method": METHOD_NAME,
+                "source": "fit",
+                "samples": args.samples,
+                "checkpoint": Path(args.checkpoint).name,
+            },
+        )
+        print(f"Fitted std temperature {fitted_scale:.4f} on '{args.split}' "
+              f"({len(df)} samples) -> saved to {cal_path}")
 
     row = summarize(
         METHOD_NAME, y_true, pred_mean,
         lower90, upper90, lower95, upper95,
         split=args.split,
-        extra={"samples": args.samples, "checkpoint": Path(args.checkpoint).name},
+        extra={
+            "samples": args.samples,
+            "checkpoint": Path(args.checkpoint).name,
+            "std_scale": std_scale,
+            "calibrated": int(std_scale != 1.0),
+        },
     )
 
     print(f"\n--- MC Dropout ({args.split}) Metrics ---")
@@ -125,7 +171,6 @@ def main():
     print(f"MPIW@95:  {row['MPIW_95']:.2f} months")
     print("----------------------------------\n")
 
-    out_dir = method_results_dir(METHOD_NAME)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     covered90 = (y_true >= lower90) & (y_true <= upper90)
@@ -136,6 +181,7 @@ def main():
         "true_age": y_true,
         "pred_mean": pred_mean,
         "pred_std": pred_std,
+        "std_scale": std_scale,
         "lower90": lower90,
         "upper90": upper90,
         "lower95": lower95,
