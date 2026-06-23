@@ -6,10 +6,11 @@ exactly as-is; UQ methods wrap inference around a trained checkpoint and are
 all compared on the **same metrics** so different approaches can be ranked
 fairly.
 
-The implemented method is **Monte Carlo (MC) Dropout**. More methods
-(Bayesian neural network, conformal prediction, deep ensembles, ...) plug in
-the same way. A `compare.py` aggregates every method's results into one ranked
-table on the shared metrics.
+Currently implemented methods: **Monte Carlo (MC) Dropout** and
+**Heteroscedastic Regression**. More methods (Bayesian neural network,
+conformal prediction, deep ensembles, ...) plug in the same way. A
+`compare.py` aggregates every method's results into one ranked table on the
+shared metrics.
 
 ## Why a separate folder
 
@@ -33,8 +34,15 @@ UQ/
 ├── mc_dropout/
 │   ├── run_mc_dropout.py      # MC Dropout evaluation (+ post-hoc calibration)
 │   └── train_mc_dropout.py    # UQ-aware training loop (calibration-aware)
+├── heteroscedastic/
+│   ├── hetero_model.py        # EfficientNet-B3 + sex, with mean + log_var heads
+│   ├── losses.py              # Gaussian NLL (+ optional SmoothL1 on the mean)
+│   ├── train_hetero.py        # Heteroscedastic training (single-pass UQ model)
+│   ├── run_hetero.py          # Single-pass evaluation (+ post-hoc calibration)
+│   └── run_hetero.sh          # conda-activating train+calib+test wrapper
 └── results/
     ├── mc_dropout/            # grouped CSV outputs for this method
+    ├── heteroscedastic/       # grouped CSV outputs for this method
     └── comparison_<ts>.csv    # cross-method comparison table
 ```
 
@@ -176,6 +184,103 @@ python -m UQ.mc_dropout.run_mc_dropout \
     --split test --calibration auto
 ```
 
+## Heteroscedastic Regression
+
+Heteroscedastic regression keeps the **same backbone** (EfficientNet-B3 + sex)
+but replaces the single regression head with two heads:
+
+- `mean_out` predicts the normalized bone age (same target as the base model).
+- `log_var_out` predicts the log-variance of a per-sample Gaussian
+  likelihood, so `sigma(x) = exp(0.5 * log_var)` varies with the input.
+
+Trained with the Gaussian negative log-likelihood
+
+```
+L = 0.5 * ( exp(-log_var) * (y - mean)^2 + log_var )
+```
+
+(optionally combined with a small SmoothL1 term on the mean), it learns
+**input-dependent aleatoric uncertainty**: wider intervals on harder
+radiographs, tighter on easier ones. Inference is a **single deterministic
+forward pass** — no MC sampling required — so it is much cheaper at eval time
+than MC Dropout.
+
+> Note: this method models aleatoric (data) uncertainty only. It does not
+> capture epistemic uncertainty about the model weights themselves. MC
+> Dropout / deep ensembles / BNNs cover that space. The methods are
+> complementary, not redundant.
+
+The package is fully self-contained under [`heteroscedastic/`](heteroscedastic/);
+removing that folder plus `results/heteroscedastic/` removes the method
+without touching the core training pipeline or other UQ methods.
+
+### Run it
+
+```bash
+conda activate rsna-boneage   # same env as base train.py
+
+# 1. Train (writes checkpoint under OUTPUT_DIR/<run_name>/)
+python -m UQ.heteroscedastic.train_hetero \
+    --output-name hetero --seed 42 --epochs 50
+
+# 2. Fit calibration on the held-out calib split
+python -m UQ.heteroscedastic.run_hetero \
+    --checkpoint outputs/hetero_seed42/best_*.pth \
+    --split calib --fit-calibration
+
+# 3. Evaluate the test split with that calibration applied
+python -m UQ.heteroscedastic.run_hetero \
+    --checkpoint outputs/hetero_seed42/best_*.pth \
+    --split test --calibration auto
+```
+
+Or one shot via the wrapper (activates conda, trains, fits, evaluates):
+
+```bash
+bash UQ/heteroscedastic/run_hetero.sh --output-name hetero --seed 42 --epochs 50
+```
+
+### Training arguments
+
+- `--output-name` (default `hetero`): run prefix; checkpoints saved under
+  `outputs/<output-name>_seed<seed>/`.
+- `--seed` (default 42), `--epochs` (default 50), `--lr` (default 1e-4),
+  `--dropout` (default 0.5): same semantics as the base trainer.
+- `--quick-test`: 1% data, 2 epochs (smoke test).
+- `--mae-weight` (default 0.01): weight of an auxiliary SmoothL1 term on the
+  mean head added to NLL. `0` is pure NLL. A small positive value preserves
+  point accuracy when NLL alone would let MAE drift.
+- `--select-by` (default `val_mae`): checkpoint selection criterion. Set to
+  `mpiw90` or `combo` to select for calibrated interval quality on the
+  calib split (mirrors the MC Dropout UQ-aware trainer).
+- `--calib-eval-every` (default 1): only used when `--select-by != val_mae`.
+
+After training, the final calibration on the calib split is written to
+`UQ/results/heteroscedastic/calibration_<ts>.json` so the evaluation step
+can pick it up with `--calibration auto`.
+
+### Evaluation arguments
+
+Same shape as `run_mc_dropout.py`:
+
+- `--checkpoint` (required): trained heteroscedastic `.pth`.
+- `--split` (default `test`): `train` / `val` / `calib` / `test`.
+- `--fit-calibration`: fit a fresh temperature on **this** split (use with
+  `--split calib`).
+- `--calibration PATH|auto`: apply a saved temperature before building
+  intervals (`auto` = newest one).
+
+### Outputs
+
+Written to `UQ/results/heteroscedastic/`:
+
+- `heteroscedastic_<split>_predictions_<ts>.csv` — same columns as the
+  MC Dropout predictions CSV (`id, sex, true_age, pred_mean, pred_std,
+  std_scale, lower90, upper90, lower95, upper95, covered90, covered95`).
+- `heteroscedastic_<split>_metrics_<ts>.csv` — one comparison row using the
+  shared schema below.
+- `calibration_<ts>.json` (with `--fit-calibration`).
+
 ## Comparing methods
 
 Once two or more methods have written metrics, aggregate them:
@@ -222,4 +327,4 @@ concatenate every `UQ/results/*/*_metrics_*.csv` into a single table.
 - **Deep ensembles** — train multiple seeds (the project already supports
   per-seed runs) and aggregate predictive variance.
 
-Implemented: **MC Dropout**.
+Implemented: **MC Dropout**, **Heteroscedastic Regression**.
