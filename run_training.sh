@@ -3,7 +3,7 @@
 # Script to easily launch the training process.
 
 # Default values
-CONDA_ENV="uq"
+CONDA_ENV="rsna-boneage"
 QUICK_TEST=0
 OUTPUT_NAME="run"
 SEED=123

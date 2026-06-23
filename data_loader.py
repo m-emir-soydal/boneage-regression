@@ -70,16 +70,23 @@ def _add_norm_cols(df, max_age):
     return df
 
 
+def _read_test_source():
+    """Load RSNA held-out test set when test.csv is present; else return empty."""
+    test_csv = DATA_DIR / "test.csv"
+    if not test_csv.exists():
+        print("  warning: test.csv not found; RSNA held-out test set will be skipped.")
+        return pd.DataFrame(columns=["id", "boneage", "male", "filepath"])
+    return _read_source(test_csv, "Image ID", "Bone Age (months)", "male", "test")
+
+
 def load_data(sample_frac=1.0):
     """
-    Loads the source train.csv + val.csv, unifies their schema, and splits
-    the source training data 50/25/25 into train/val/calibration. The source
-    validation set is used as the held-out TEST set.
+    Loads train.csv and test.csv, unifies their schema, and splits the source
+    training data 50/25/25 into train/validation/calibration. test.csv (images
+    under data/test/) is the external held-out test set from RSNA.
     """
     train_full = _read_source(DATA_DIR / "train.csv", "id", "boneage", "male", "train")
-    test_df = _read_source(
-        DATA_DIR / "val.csv", "Image ID", "Bone Age (months)", "male", "val"
-    )
+    test_df = _read_test_source()
 
     if sample_frac < 1.0:
         train_full = train_full.sample(frac=sample_frac, random_state=RANDOM_STATE)
@@ -138,7 +145,7 @@ def build_datasets(train_df, val_df, batch_size=BATCH_SIZE):
     return train_loader, val_loader
 
 
-def build_val_or_test_loader(df, batch_size=BATCH_SIZE):
+def build_eval_loader(df, batch_size=BATCH_SIZE):
     """
     Converts a single DataFrame (validation, calibration, or test) into a
     torch DataLoader with eval-time transforms and no shuffling.

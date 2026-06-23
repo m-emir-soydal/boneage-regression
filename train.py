@@ -7,9 +7,58 @@ from pathlib import Path
 from tqdm import tqdm
 
 from config import OUTPUT_DIR
-from data_loader import load_data, build_datasets, build_val_or_test_loader
+from data_loader import load_data, build_datasets, build_eval_loader
 from model import build_multi_input_model
 from metrics import evaluate_and_save_metrics
+
+MIN_CUDA_FREE_BYTES = 4 * 1024 ** 3  # model + Adam states need several GiB headroom
+
+
+def select_device(model, train_loader, criterion):
+    """Use CUDA when a full training step succeeds; otherwise stay on CPU."""
+    if not torch.cuda.is_available():
+        return torch.device("cpu"), model
+
+    torch.backends.cudnn.enabled = False
+    try:
+        free, _total = torch.cuda.mem_get_info()
+        if free < MIN_CUDA_FREE_BYTES:
+            free_gb = free / (1024 ** 3)
+            print(f"  warning: GPU has only {free_gb:.1f} GiB free; using CPU.")
+            return torch.device("cpu"), model
+
+        model = model.cuda().train()
+        probe_optimizer = optim.Adam(model.parameters(), lr=1e-4)
+        inputs, targets = next(iter(train_loader))
+        img = inputs["image_input"].cuda()
+        sex = inputs["sex_input"].cuda()
+        targets = targets.cuda()
+
+        probe_optimizer.zero_grad()
+        outputs = model(img, sex)
+        loss = criterion(outputs, targets)
+        loss.backward()
+        probe_optimizer.step()
+
+        del probe_optimizer, outputs, loss, img, sex, targets, inputs
+        model.zero_grad(set_to_none=True)
+        torch.cuda.empty_cache()
+        return torch.device("cuda"), model
+    except RuntimeError as exc:
+        if "out of memory" not in str(exc).lower():
+            raise
+        print("  warning: GPU ran out of memory during probe; using CPU.")
+        torch.cuda.empty_cache()
+        return torch.device("cpu"), model.cpu()
+
+
+def move_training_to_cpu(model, optimizer):
+    """Recreate optimizer on CPU after a mid-run CUDA OOM."""
+    lr = optimizer.param_groups[0]["lr"]
+    torch.cuda.empty_cache()
+    model = model.cpu()
+    return model, optim.Adam(model.parameters(), lr=lr)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Train Multi-Input Bone Age Model with PyTorch")
@@ -43,18 +92,16 @@ def main():
     print("Building PyTorch DataLoaders...")
     train_loader, val_loader = build_datasets(train_df, val_df)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-
     print("Building model...")
     model = build_multi_input_model()
-    model = model.to(device)
-    
-    criterion = nn.SmoothL1Loss() # Huber / smooth L1 for training
+    criterion = nn.SmoothL1Loss()  # Huber / smooth L1 for training
+    device, model = select_device(model, train_loader, criterion)
+    print(f"Using device: {device}")
+
     mae_metric = nn.L1Loss()      # MAE for monitoring / checkpointing
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-6, verbose=True
+        optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-6
     )
 
     best_val_mae = float('inf')
@@ -76,12 +123,27 @@ def main():
             img = inputs['image_input'].to(device)
             sex = inputs['sex_input'].to(device)
             targets = targets.to(device)
-            
-            optimizer.zero_grad()
-            outputs = model(img, sex)
-            loss = criterion(outputs, targets)
-            loss.backward()
-            optimizer.step()
+
+            try:
+                optimizer.zero_grad()
+                outputs = model(img, sex)
+                loss = criterion(outputs, targets)
+                loss.backward()
+                optimizer.step()
+            except RuntimeError as exc:
+                if device.type != "cuda" or "out of memory" not in str(exc).lower():
+                    raise
+                print("  warning: GPU OOM during training; switching to CPU.")
+                device = torch.device("cpu")
+                model, optimizer = move_training_to_cpu(model, optimizer)
+                img = inputs['image_input'].to(device)
+                sex = inputs['sex_input'].to(device)
+                targets = targets.to(device)
+                optimizer.zero_grad()
+                outputs = model(img, sex)
+                loss = criterion(outputs, targets)
+                loss.backward()
+                optimizer.step()
             
             train_loss += loss.item() * img.size(0)
             progress_bar.set_postfix({'loss': loss.item()})
@@ -167,10 +229,16 @@ def main():
 
     evaluate_and_save_metrics(model, val_loader, val_df, max_age, run_name=run_name, split="val", device=device)
     
-    print("\nRunning evaluation on test set...")
-    test_loader = build_val_or_test_loader(test_df)
-    evaluate_and_save_metrics(model, test_loader, test_df, max_age, run_name=run_name, split="test", device=device)
-    
+    if len(test_df) > 0:
+        print("\nRunning evaluation on test set...")
+        test_loader = build_eval_loader(test_df)
+        evaluate_and_save_metrics(
+            model, test_loader, test_df, max_age,
+            run_name=run_name, split="test", device=device,
+        )
+    else:
+        print("\nSkipping test set evaluation (test.csv not available).")
+
     print("Training process completed.")
 
 if __name__ == "__main__":

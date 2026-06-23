@@ -1,7 +1,7 @@
 import argparse
 import torch
 
-from data_loader import load_data, build_val_or_test_loader
+from data_loader import load_data, build_eval_loader
 from model import build_multi_input_model
 from metrics import evaluate_and_save_metrics
 
@@ -15,9 +15,11 @@ def main():
     # Re-uses the same deterministic split (RANDOM_STATE) as training,
     # so max_age matches the normalization used at train time.
     _, _, _, test_df, max_age = load_data(sample_frac=1.0)
+    if len(test_df) == 0:
+        raise SystemExit("No test set available (test.csv not found).")
     print(f"Test set: {len(test_df)} samples")
 
-    test_loader = build_val_or_test_loader(test_df)
+    test_loader = build_eval_loader(test_df)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")

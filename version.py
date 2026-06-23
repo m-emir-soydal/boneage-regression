@@ -62,6 +62,6 @@
 * - Tensorflow converted to pytorch.                *
 * - Train/cal/val split changed to 50/25/25.        *
 * - Train on 3 different seeds and save results.    *
-* - Test on original validation set of RSNA.        *
+* - Test on original RSNA test set (test.csv).        *
 *****************************************************
 """
