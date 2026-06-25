@@ -22,7 +22,14 @@ def _can_stratify(series):
     return len(counts) > 1 and counts.min() >= 2
 
 
-def _split_existing_calibration(calib_df):
+def _split_random_state(seed):
+    """Return the sklearn random_state used for this seed's data partitions."""
+    if C.PER_SEED_SPLITS:
+        return seed
+    return C.SPLIT_RANDOM_STATE
+
+
+def _split_existing_calibration(calib_df, split_random_state):
     if len(calib_df) < 2:
         scale_df = calib_df.copy()
         cal_df = calib_df.copy()
@@ -32,7 +39,7 @@ def _split_existing_calibration(calib_df):
     scale_df, cal_df = train_test_split(
         calib_df,
         test_size=0.5,
-        random_state=C.SPLIT_RANDOM_STATE,
+        random_state=split_random_state,
         stratify=stratify,
     )
     return scale_df.reset_index(drop=True), cal_df.reset_index(drop=True)
@@ -49,13 +56,17 @@ def _split_frame(df, split_name):
 
 
 def create_split(seed):
-    """Create the CP split file for one seed using the existing project split."""
+    """Create the CP split file for one seed."""
     seed_dir = C.RUN_OUTPUT_DIR / f"seed_{seed:02d}"
     seed_dir.mkdir(parents=True, exist_ok=True)
 
-    train_df, val_df, calib_df, test_df, max_age = load_data(sample_frac=C.DATA_FRACTION)
+    split_random_state = _split_random_state(seed)
+    train_df, val_df, calib_df, test_df, max_age = load_data(
+        sample_frac=C.DATA_FRACTION,
+        split_random_state=split_random_state,
+    )
     test_df = _sample_eval_split(test_df, seed)
-    scale_df, cal_df = _split_existing_calibration(calib_df)
+    scale_df, cal_df = _split_existing_calibration(calib_df, split_random_state)
 
     split_df = pd.concat(
         [
@@ -76,6 +87,8 @@ def create_split(seed):
         "max_age": float(max_age),
         "data_fraction": C.DATA_FRACTION,
         "split_note": C.SPLIT_NOTE,
+        "per_seed_splits": C.PER_SEED_SPLITS,
+        "split_random_state": int(split_random_state),
         "n_train": int((split_df["split"] == "train").sum()),
         "n_val": int((split_df["split"] == "val").sum()),
         "n_scale": int((split_df["split"] == "scale").sum()),

@@ -70,31 +70,38 @@ def _add_norm_cols(df, max_age):
     return df
 
 
-def load_data(sample_frac=1.0):
+def load_data(sample_frac=1.0, split_random_state=None):
     """
     Loads the source train.csv + val.csv, unifies their schema, and splits
     the source training data 50/25/25 into train/val/calibration. The source
     validation set is used as the held-out TEST set.
+
+    Args:
+        sample_frac: Fraction of source training rows to use.
+        split_random_state: Random state for train/val/calib splits. Defaults to
+            RANDOM_STATE from config when not provided.
     """
+    split_state = RANDOM_STATE if split_random_state is None else split_random_state
+
     train_full = _read_source(DATA_DIR / "train.csv", "id", "boneage", "male", "train")
     test_df = _read_source(
         DATA_DIR / "val.csv", "Image ID", "Bone Age (months)", "male", "val"
     )
 
     if sample_frac < 1.0:
-        train_full = train_full.sample(frac=sample_frac, random_state=RANDOM_STATE)
+        train_full = train_full.sample(frac=sample_frac, random_state=split_state)
 
     # 50 / 25 / 25 split, stratified by sex.
     train_df, temp_df = train_test_split(
         train_full,
         test_size=0.5,
-        random_state=RANDOM_STATE,
+        random_state=split_state,
         stratify=train_full["male"],
     )
     val_df, calib_df = train_test_split(
         temp_df,
         test_size=0.5,
-        random_state=RANDOM_STATE,
+        random_state=split_state,
         stratify=temp_df["male"],
     )
 

@@ -8,7 +8,7 @@ RUN_MODE = "full"
 
 # Optional output folder name under results/cps/.
 # Leave as None to use the default folder name: "debug" or "full".
-RUN_TAG = "full_1"
+RUN_TAG = "full_2"
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_ROOT = Path(os.getenv("DATA_DIR", "./data"))
@@ -57,7 +57,16 @@ SPLIT_RATIOS = {
     "scale": 0.125,
     "cal": 0.125,
 }
-SPLIT_NOTE = "test uses the existing source validation set, as in train.py"
+# When True, each seed gets its own stratified train/val/cal/scale split
+# (random_state = seed). The official source validation set remains TEST.
+# When False, all seeds share the fixed split from SPLIT_RANDOM_STATE (full_1).
+PER_SEED_SPLITS = True
+SPLIT_NOTE = (
+    "per-seed stratified 50/25/12.5/12.5 split from train.csv; "
+    "official source validation set is TEST"
+    if PER_SEED_SPLITS
+    else "fixed split for all seeds; test uses the existing source validation set"
+)
 SPLIT_RANDOM_STATE = 42
 
 KNN_K = 50
@@ -120,6 +129,7 @@ def active_config_dict():
         "DEVICE": DEVICE,
         "SPLIT_RATIOS": SPLIT_RATIOS,
         "SPLIT_NOTE": SPLIT_NOTE,
+        "PER_SEED_SPLITS": PER_SEED_SPLITS,
         "SPLIT_RANDOM_STATE": SPLIT_RANDOM_STATE,
         "KNN_K": KNN_K,
         "KNN_METRIC": KNN_METRIC,
