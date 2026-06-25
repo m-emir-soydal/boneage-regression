@@ -1,0 +1,10 @@
+{
+  "std_scale": 0.4286817730930858,
+  "split": "calib",
+  "n": 3153,
+  "timestamp": "20260624_221814",
+  "method": "bnn",
+  "source": "fit",
+  "samples": 30,
+  "checkpoint": "best_bnn_full100ep_seed42_ep87_score61.1617.pth"
+}

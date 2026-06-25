@@ -1,0 +1,14 @@
+{
+  "std_scale": 0.4255371945574243,
+  "split": "calib",
+  "n": 3153,
+  "timestamp": "20260624_221037",
+  "method": "bnn",
+  "source": "uq_train",
+  "samples": 30,
+  "checkpoint": "best_bnn_full100ep_seed42_ep87_score61.1617.pth",
+  "run_name": "bnn_full100ep_seed42",
+  "dropout": 0.5,
+  "prior_sigma": 1.0,
+  "kl_weight": 1.0
+}

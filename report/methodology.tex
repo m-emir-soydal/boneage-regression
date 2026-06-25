@@ -1,0 +1,444 @@
+% Methodology section: Uncertainty Quantification for pediatric bone age regression.
+% Self-contained, compilable document. Can also be \input{} into a larger report
+% by reusing the body between \begin{document} and \end{document}.
+\documentclass[11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{geometry}
+\usepackage[hidelinks]{hyperref}
+
+\geometry{margin=1in}
+
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{Uncertainty Quantification for Pediatric Bone Age Regression:\\ Methodology}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Overview and Design Philosophy}
+
+This work augments a deterministic point-regression model for pediatric bone age
+estimation with three complementary uncertainty quantification (UQ) methods:
+\emph{Monte Carlo (MC) Dropout}, \emph{Heteroscedastic Regression}, and a
+\emph{Bayesian Neural Network (BNN)}. Each method produces, for every radiograph,
+not only a point estimate of bone age (in months) but also a calibrated
+\emph{prediction interval} expressing the model's confidence in that estimate.
+
+The UQ layer is deliberately designed to be \emph{additive}. The production
+point-regression pipeline---the model definition (\code{model.py}), the training
+loop (\code{train.py}), and the data pipeline (\code{data\_loader.py})---is left
+unchanged. Every UQ method lives in its own self-contained package under
+\code{UQ/<method>/} and reuses a small set of shared utilities under
+\code{UQ/common/}. This separation guarantees that (i) the deterministic baseline
+remains reproducible, (ii) a method can be removed simply by deleting its folder,
+and (iii) all methods are evaluated through identical interval-construction,
+calibration, and metric code, so they can be ranked fairly.
+
+A unifying principle across the three methods is that they all reduce, at
+inference time, to a per-sample predictive mean $\mu_i$ and a per-sample
+predictive standard deviation $\sigma_i$. From these two quantities, Gaussian
+prediction intervals are constructed and scored on the same coverage and width
+metrics. All metrics are computed in de-normalized \emph{month space} so that
+the methods are directly comparable to one another and to the deterministic
+baseline.
+
+\section{Shared Experimental Setup}
+\label{sec:setup}
+
+\subsection{Base Architecture}
+
+All three UQ methods share the same backbone as the deterministic baseline, a
+multi-input convolutional regression network (\code{MultiInputModel} in
+\code{model.py}). The architecture fuses image features with patient sex:
+
+\begin{itemize}
+  \item \textbf{Image branch.} A pre-trained EfficientNet-B3 (ImageNet
+  \code{IMAGENET1K\_V1} weights) acts as the feature extractor. Its
+  classification head is replaced by an identity mapping
+  (\code{nn.Identity}), exposing the raw pooled feature vector of dimension
+  $d_\text{img}$ (the EfficientNet-B3 classifier input width).
+  \item \textbf{Sex branch.} The binary sex indicator is passed through a linear
+  layer $\mathbb{R}^{1}\!\to\!\mathbb{R}^{32}$ followed by a ReLU activation.
+  \item \textbf{Fusion head.} The image and sex features are concatenated into a
+  $(d_\text{img}+32)$-dimensional vector and passed through a fully connected
+  layer to $256$ units (ReLU), a dropout layer with rate $0.5$, and a final
+  linear layer producing a single scalar---the normalized bone age.
+\end{itemize}
+
+Each UQ method modifies \emph{only} the prediction head of this backbone (or its
+inference procedure), as detailed in Sections~\ref{sec:mcdropout}--\ref{sec:bnn}.
+
+\subsection{Data, Preprocessing, and Splits}
+
+Radiographs are loaded as RGB images, resized to $300\times300$ pixels, and
+normalized with the standard ImageNet channel statistics
+($\mu=[0.485, 0.456, 0.406]$, $\sigma=[0.229, 0.224, 0.225]$). During training,
+the images are augmented with random rotation ($\pm20^\circ$), random horizontal
+flips, random affine translation/scaling, and color jitter
+(brightness/contrast). Evaluation and calibration use the deterministic
+resize-and-normalize transform with no augmentation and no shuffling, so that
+predictions remain aligned with their targets.
+
+The training source (\code{train.csv}) is partitioned, stratified by sex with a
+fixed random seed (\code{RANDOM\_STATE}~$=42$), into three disjoint splits in a
+$50/25/25$ ratio:
+\begin{itemize}
+  \item \textbf{train} ($50\%$): used to fit model parameters;
+  \item \textbf{val} ($25\%$): used to monitor point accuracy and drive the
+  learning-rate scheduler;
+  \item \textbf{calib} ($25\%$): a held-out split reserved for \emph{post-hoc
+  uncertainty calibration} (Section~\ref{sec:calibration}).
+\end{itemize}
+The RSNA held-out \code{test.csv} (images under \code{data/test/}) serves as the
+external test set and is never seen during training or calibration.
+
+Bone age targets $y$ (in months) are normalized to $\tilde{y} = y / y_{\max}$,
+where $y_{\max}$ is the maximum bone age in the \emph{training} split only;
+applying the train-derived $y_{\max}$ to every split avoids information leakage.
+All model outputs are produced in this normalized space and multiplied back by
+$y_{\max}$ (\emph{de-normalization}) before any metric is computed, so that
+coverage and interval widths are reported in clinically interpretable months.
+
+The dedicated \code{calib} split is what makes principled post-hoc calibration
+possible: it provides labelled data, disjoint from both training and test, on
+which the relationship between predicted uncertainty and observed error can be
+estimated.
+
+\section{Shared Uncertainty Infrastructure}
+\label{sec:infra}
+
+The three methods share the interval-construction, metric, and calibration code
+under \code{UQ/common/}. Describing it once avoids repetition and makes explicit
+that differences in results stem from the methods themselves, not from
+differing evaluation code.
+
+\subsection{Gaussian Prediction Intervals}
+
+Given a per-sample predictive mean $\mu_i$ and standard deviation $\sigma_i$ (both
+in months), a two-sided prediction interval at confidence level $c$ is
+constructed under a Gaussian assumption as
+\begin{equation}
+  \big[\,\mu_i - z_c\,\sigma_i,\;\; \mu_i + z_c\,\sigma_i\,\big],
+  \label{eq:interval}
+\end{equation}
+where $z_c$ is the standard-normal quantile for the nominal level: $z_{90}=1.645$
+for $90\%$ and $z_{95}=1.960$ for $95\%$. The two confidence levels share the
+same $\mu_i$ and $\sigma_i$ and differ only through $z_c$.
+
+\subsection{Evaluation Metrics}
+\label{sec:metrics}
+
+Let $\{(y_i, \mu_i)\}_{i=1}^{N}$ be the true ages and predictive means, and let
+$[\ell_i^{(c)}, u_i^{(c)}]$ denote the interval at level $c$. Two
+interval-quality metrics are reported at both $90\%$ and $95\%$:
+
+\paragraph{Prediction Interval Coverage Probability (PICP).} The empirical
+fraction of true values contained in their intervals,
+\begin{equation}
+  \mathrm{PICP}@c = \frac{1}{N}\sum_{i=1}^{N}
+  \mathbb{1}\!\left[\,\ell_i^{(c)} \le y_i \le u_i^{(c)}\,\right].
+\end{equation}
+A well-calibrated $90\%$ interval should yield $\mathrm{PICP}@90 \approx 0.90$.
+
+\paragraph{Mean Prediction Interval Width (MPIW).} The average interval width in
+months,
+\begin{equation}
+  \mathrm{MPIW}@c = \frac{1}{N}\sum_{i=1}^{N}
+  \left(u_i^{(c)} - \ell_i^{(c)}\right).
+\end{equation}
+Given adequate coverage, smaller MPIW is preferable, as it indicates tighter,
+more informative intervals.
+
+\paragraph{Point-accuracy metrics.} For parity with the deterministic baseline,
+the mean prediction $\mu_i$ is also scored with mean absolute error (MAE),
+root-mean-square error (RMSE), the coefficient of determination $R^2$, and the
+fraction of predictions within $6$ and $12$ months of ground truth. A method is
+considered well calibrated when its PICP lands close to the nominal level; among
+methods with comparable coverage, the one with smaller MPIW is preferred.
+
+\subsection{Post-hoc Calibration via Temperature Scaling}
+\label{sec:calibration}
+
+The raw predictive standard deviation produced by a UQ method is rarely
+perfectly scaled: in practice it tends to be too small, so the intervals of
+Equation~\eqref{eq:interval} \emph{under-cover} (PICP below nominal). The
+standard remedy is a single-parameter \emph{temperature scaling} of the
+standard deviation. A scalar $s>0$ is fit on the held-out \code{calib} split as
+the maximum-likelihood scale of a zero-mean Gaussian fit to the standardized
+residuals:
+\begin{equation}
+  s = \sqrt{\frac{1}{N}\sum_{i=1}^{N}\left(\frac{y_i - \mu_i}{\sigma_i}\right)^{2}},
+  \label{eq:temperature}
+\end{equation}
+computed in month space, with $\sigma_i$ floored by a small $\epsilon$ to avoid
+division by zero. The calibrated intervals then use $\sigma_i^{\text{eff}} = s\,
+\sigma_i$ in Equation~\eqref{eq:interval}. Intuitively, $s=1$ means the raw
+standard deviation already matched the residual spread; $s>1$ widens the
+intervals (the common case), and $s<1$ tightens them. Because a single scalar is
+applied across both confidence levels, the $90\%$ and $95\%$ intervals remain
+mutually consistent.
+
+The fitted $s$ is persisted to a small, self-describing JSON file (recording
+the scale, the split it was fit on, the sample count, a timestamp, and method
+metadata) so it can be audited and reused. The same $s$ that is estimated on
+\code{calib} is later applied unchanged to the \code{test} split, which is the
+correct protocol: the test set is used only for final measurement, never for
+fitting calibration.
+
+\subsection{Common Workflow}
+
+Every method follows the same three-stage protocol:
+\begin{enumerate}
+  \item \textbf{Train} the model and select a checkpoint (selection criteria
+  described per method below);
+  \item \textbf{Fit calibration} by running inference on the \code{calib} split
+  and computing $s$ via Equation~\eqref{eq:temperature};
+  \item \textbf{Evaluate} on the \code{test} split with the saved $s$ applied,
+  emitting per-sample predictions and a single metrics row.
+\end{enumerate}
+
+\section{Method 1: Monte Carlo Dropout}
+\label{sec:mcdropout}
+
+\subsection{Principle}
+
+Monte Carlo Dropout treats the dropout layer already present in the trained
+network as an approximate source of epistemic (model) uncertainty. Whereas a
+standard model disables dropout at inference (\code{model.eval()}), MC Dropout
+keeps the dropout layers \emph{active} while leaving all other layers (e.g.\
+BatchNorm) in evaluation mode. Each forward pass then samples a different
+sub-network, and repeated passes over the same input yield a distribution of
+predictions.
+
+Concretely, the model is put into evaluation mode and every \code{nn.Dropout}
+module is switched back to training mode. For an input $x_i$, $T$ stochastic
+forward passes produce predictions $\{\hat{y}_i^{(t)}\}_{t=1}^{T}$ (in normalized
+space). The predictive mean and standard deviation are the per-sample sample
+statistics
+\begin{equation}
+  \mu_i = \frac{1}{T}\sum_{t=1}^{T}\hat{y}_i^{(t)},
+  \qquad
+  \sigma_i = \sqrt{\frac{1}{T}\sum_{t=1}^{T}\big(\hat{y}_i^{(t)} - \mu_i\big)^{2}},
+\end{equation}
+which are de-normalized to months before interval construction. The default
+number of passes is $T=30$ at evaluation time. The data loader does not shuffle,
+so targets stay aligned across passes.
+
+A notable property of this setup is that the baseline architecture contains a
+\emph{single} dropout layer in its head (the EfficientNet classifier having been
+replaced by an identity mapping). The MC variance is therefore driven entirely
+by that one layer. The model is intentionally left unchanged so that the
+``same regression model'' comparison against the other methods remains valid.
+
+\subsection{UQ-aware Training and Checkpoint Selection}
+
+Post-hoc calibration (Section~\ref{sec:calibration}) can pin coverage to the
+nominal level, but it cannot make the intervals \emph{tighter}; interval
+sharpness is determined at training time. A dedicated training loop
+(\code{train\_mc\_dropout.py}), a sibling of the base trainer, trains the same
+architecture while optimizing for uncertainty quality:
+\begin{itemize}
+  \item The dropout rate is configurable (rather than hard-coded), since it
+  governs the magnitude of the MC predictive spread.
+  \item After each epoch, MC Dropout is run on the \code{calib} split, a
+  temperature $s$ is fit, and the epoch is scored by the quality of the
+  \emph{calibrated} intervals rather than by plain validation MAE.
+\end{itemize}
+
+The checkpoint-selection score (lower is better) can be one of:
+\begin{itemize}
+  \item \code{val\_mae}: plain validation MAE (the baseline behaviour);
+  \item \code{picp90}: $\lvert \mathrm{PICP}@90 - 0.90 \rvert$, i.e.\ closeness
+  of calibrated coverage to nominal;
+  \item \code{mpiw90}: calibrated $\mathrm{MPIW}@90$ (tightest intervals);
+  \item \code{combo} (default): a trade-off
+  $\mathrm{MPIW}@90 + \lambda\,\mathrm{MAE}$, where $\lambda$ (default $0.01$)
+  weights the calibration-split MAE in months.
+\end{itemize}
+The rationale for \code{combo} is that, since calibration already fixes
+coverage, the meaningful objective becomes minimizing interval width while a
+small MAE penalty prevents point accuracy from regressing. To keep training
+affordable, the per-epoch calibration evaluation uses a small number of passes
+(default $10$), while the final, definitive calibration after restoring the best
+checkpoint uses more passes (default $30$). The resulting temperature is saved
+for reuse at test time.
+
+\section{Method 2: Heteroscedastic Regression}
+\label{sec:hetero}
+
+\subsection{Principle}
+
+Heteroscedastic regression keeps the same EfficientNet-B3 + sex backbone but
+replaces the single regression head with \emph{two} heads sharing the
+$256$-dimensional fused representation:
+\begin{itemize}
+  \item \code{mean\_out} predicts the normalized bone age $\mu(x)$ (the same
+  target as the baseline);
+  \item \code{log\_var\_out} predicts the logarithm of the per-sample variance,
+  $\log \sigma^2(x)$, of a Gaussian observation model.
+\end{itemize}
+Predicting $\log \sigma^2$ rather than $\sigma$ or $\sigma^2$ directly keeps the
+output unconstrained over $(-\infty, \infty)$, avoiding negative variances and
+improving numerical stability. The predictive standard deviation is recovered
+as $\sigma(x) = \exp\!\big(\tfrac{1}{2}\log\sigma^2(x)\big)$.
+
+This formulation captures \emph{input-dependent aleatoric uncertainty}: the
+network can assign wider intervals to harder radiographs and tighter ones to
+easier cases. Unlike MC Dropout, inference requires only a \emph{single}
+deterministic forward pass that returns $(\mu, \log\sigma^2)$ jointly, making it
+considerably cheaper at evaluation time. It is worth noting that this method
+models aleatoric (data) uncertainty only and does not, on its own, capture
+epistemic uncertainty about the model weights; in this respect it is
+complementary to MC Dropout and the BNN.
+
+\subsection{Training Objective}
+
+The model is trained by minimizing the Gaussian negative log-likelihood (NLL).
+For a per-sample Gaussian $\mathcal{N}\!\big(\mu(x), \sigma^2(x)\big)$, the NLL,
+up to an additive constant, is
+\begin{equation}
+  \mathcal{L}_\text{NLL} =
+  \frac{1}{2}\,\Big(\exp\!\big(-\log\sigma^2\big)\,(y - \mu)^2 + \log\sigma^2\Big).
+  \label{eq:nll}
+\end{equation}
+The two terms of Equation~\eqref{eq:nll} balance one another. The first term
+divides the squared residual by the predicted variance, so that the model can
+attenuate the loss contribution of inputs it deems uncertain by predicting a
+larger variance. The second term, $\log\sigma^2$, is a penalty that prevents the
+trivial solution of predicting infinite variance everywhere.
+
+To prevent numerical pathologies, the predicted log-variance is clamped to
+$[-12, 4]$ (corresponding to $\sigma$ in roughly $[1.8\times10^{-3}, 7.4]$ in
+normalized age space). This guards against two failure modes: a log-variance
+that is too negative makes the inverse variance $\exp(-\log\sigma^2)$ explode
+(causing exploding gradients), while one that is too positive lets training
+collapse into predicting massive uncertainty.
+
+An optional auxiliary term may be mixed in: a SmoothL1 loss on the mean head,
+weighted by $\lambda_\text{mae}$,
+\begin{equation}
+  \mathcal{L} = \mathcal{L}_\text{NLL}
+  + \lambda_\text{mae}\,\mathrm{SmoothL1}(\mu, y).
+\end{equation}
+Setting $\lambda_\text{mae}=0$ recovers pure NLL; a small positive value (e.g.\
+$0.01$) keeps the mean head close to a SmoothL1 optimum, which empirically
+preserves point accuracy that pure NLL might otherwise sacrifice in favour of
+better-calibrated variance.
+
+\subsection{Inference and Selection}
+
+At inference, a single forward pass yields $(\mu, \log\sigma^2)$; the clamped
+log-variance is converted to $\sigma$, both are de-normalized, the temperature
+$s$ from Section~\ref{sec:calibration} is applied, and intervals are formed via
+Equation~\eqref{eq:interval}. Checkpoint selection mirrors the MC Dropout
+trainer, supporting \code{val\_mae} (the default), \code{picp90}, \code{mpiw90},
+and \code{combo}; when a UQ-aware criterion is selected, the calibrated interval
+quality is evaluated on the \code{calib} split. The final temperature is fit on
+\code{calib} after restoring the best checkpoint and saved for the test-time
+evaluation.
+
+\section{Method 3: Bayesian Neural Network}
+\label{sec:bnn}
+
+\subsection{Principle}
+
+The Bayesian Neural Network captures \emph{epistemic} uncertainty by treating
+the weights of the regression head as random variables with a learned posterior
+distribution, following the Bayes-by-Backprop framework of
+Blundell et al.~(2015). The two fully connected head layers (\code{fc1} and
+\code{out}) are replaced by \code{VariationalLinear} layers, while the
+pre-trained EfficientNet-B3 backbone remains deterministic. Restricting the
+Bayesian treatment to the head keeps training tractable and stable while still
+modelling weight uncertainty where the regression decision is made.
+
+\subsection{Variational Layers}
+
+Each \code{VariationalLinear} layer maintains, for every weight and bias, a mean
+parameter $\mu$ and an unconstrained scale parameter $\rho$. The positive
+standard deviation is obtained through a softplus transform,
+$\sigma = \mathrm{softplus}(\rho) = \log\!\big(1 + e^{\rho}\big)$, which keeps
+$\sigma > 0$ without explicit constraints. During a stochastic forward pass,
+weights are drawn from the Gaussian posterior using the reparameterization
+trick,
+\begin{equation}
+  w = \mu + \sigma \odot \varepsilon, \qquad \varepsilon \sim \mathcal{N}(0, I),
+\end{equation}
+which keeps the sampling operation differentiable with respect to $\mu$ and
+$\rho$. The means $\mu$ are initialized with He-uniform initialization, and the
+scales are initialized so that the initial posterior standard deviation is small
+($\sigma \approx 0.05$, via $\rho = \log(e^{\sigma}-1)$). At a deterministic
+(mean) forward pass the layer simply uses $w=\mu$.
+
+\subsection{Training Objective (ELBO)}
+
+Training maximizes the Evidence Lower Bound (ELBO), expressed here as a loss to
+be minimized:
+\begin{equation}
+  \mathcal{L}_\text{ELBO} =
+  \mathrm{SmoothL1}(y, \hat{y})
+  + \beta\,\frac{\mathrm{KL}}{N_\text{train}},
+  \label{eq:elbo}
+\end{equation}
+where the SmoothL1 term is the (negative log-likelihood surrogate) data-fit
+term, $N_\text{train}$ is the number of training samples, and $\beta$ is a
+configurable weight (\code{kl\_weight}) on the Kullback--Leibler regularizer.
+Dividing the KL term by $N_\text{train}$ scales the per-dataset complexity cost
+to a per-sample basis, balancing it against the per-sample data term.
+
+The KL divergence is accumulated analytically over all variational weights and
+biases. For a Gaussian posterior $\mathcal{N}(\mu, \sigma^2)$ against a
+zero-mean Gaussian prior $\mathcal{N}(0, \sigma_\text{prior}^2)$, each parameter
+contributes
+\begin{equation}
+  D_\text{KL}\!\big(\mathcal{N}(\mu,\sigma^2)\,\|\,\mathcal{N}(0,\sigma_\text{prior}^2)\big)
+  = \log\frac{\sigma_\text{prior}}{\sigma}
+  + \frac{\sigma^2 + \mu^2}{2\,\sigma_\text{prior}^2}
+  - \frac{1}{2},
+\end{equation}
+where the prior standard deviation $\sigma_\text{prior}$ (\code{prior\_sigma}) is
+a hyperparameter.
+
+\subsection{Inference}
+
+At inference, the variational layers (and the head dropout) are kept active so
+that each forward pass samples a different set of head weights. As in MC
+Dropout, $T$ stochastic passes over an input yield a predictive sample whose
+per-sample mean and standard deviation give $\mu_i$ and $\sigma_i$. These are
+de-normalized, scaled by the calibration temperature $s$, and turned into
+intervals via Equation~\eqref{eq:interval}. The UQ-aware training loop
+(\code{train\_bnn.py}) selects checkpoints with the same criteria as the other
+methods (defaulting to \code{combo}), evaluating calibrated interval quality on
+the \code{calib} split each epoch and fitting the definitive temperature with
+more passes after restoring the best checkpoint.
+
+\section{Cross-method Comparison Protocol}
+\label{sec:compare}
+
+Because all three methods reduce to a per-sample $(\mu_i, \sigma_i)$ and are
+scored by the same code, their results are directly comparable. Every method
+emits a metrics row following a shared schema---method name, split, the point
+metrics (MAE, RMSE, MSE, $R^2$, fraction within $6$/$12$ months), the interval
+metrics (PICP@90/95, MPIW@90/95), the sample count, optional method-specific
+fields (e.g.\ number of MC samples, applied temperature, calibration flag), and
+a timestamp.
+
+An aggregation step (\code{compare.py}) scans every method's metrics files,
+retains the most recent row per (method, split) pair, and ranks the methods.
+The ranking key is, first, the absolute calibration error
+$\lvert \mathrm{PICP}@90 - 0.90 \rvert$ (best-calibrated first) and, second, the
+calibrated $\mathrm{MPIW}@90$ (tightest intervals as a tie-breaker). This
+encodes the guiding principle that coverage close to nominal is the primary
+requirement, and that among adequately calibrated methods the tighter,
+more informative intervals are preferred. The numerical outcomes of this
+comparison are reported in the Results section.
+
+\end{document}

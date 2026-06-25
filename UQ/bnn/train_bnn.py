@@ -1,28 +1,14 @@
-"""UQ-aware training loop for MC Dropout (Option 1).
+"""UQ-aware training loop for Bayesian Neural Network (BNN).
 
-This is a sibling of the base ``train.py`` that trains the *same* multi-input
-regression model but optimizes for **uncertainty quality**, not just point
-accuracy. Two things differ from the base trainer:
-
-1. The dropout rate is configurable (``--dropout``) so MC sampling can produce
-   a meaningful predictive spread.
-2. Checkpoint selection is **UQ-aware**: after each (or every k-th) epoch it
-   runs MC Dropout on the held-out ``calib`` split, fits a post-hoc temperature
-   (see ``common.calibration``), and scores the epoch by how good the
-   *calibrated* intervals are. Because post-hoc calibration already pins
-   coverage to the nominal level, the meaningful objective becomes the
-   **calibrated interval width** (MPIW@90) traded off against point accuracy
-   (MAE). The base ``train.py`` instead keeps the epoch with the lowest plain
-   val MAE (dropout off), which says nothing about interval quality.
-
-When training finishes the best weights are restored, a final MC pass on
-``calib`` fits the definitive temperature, and that calibration JSON is written
-to ``UQ/results/mc_dropout/`` so ``run_mc_dropout.py --calibration auto`` can
-reuse it to evaluate the test split.
+Trains the Bayesian multi-input regression model using the Evidence Lower Bound (ELBO)
+loss (SmoothL1Loss + KL divergence). Checkpoint selection is UQ-aware: after each
+epoch it runs Monte Carlo sampling on the held-out ``calib`` split, fits a post-hoc
+temperature (see ``common.calibration``), and scores the epoch by the quality of
+the calibrated prediction intervals (MPIW@90) traded off against point accuracy (MAE).
 
 Example:
-    python -m UQ.mc_dropout.train_mc_dropout \\
-        --output-name uqtrain --dropout 0.5 --epochs 50 \\
+    python -m UQ.bnn.train_bnn \\
+        --output-name bnntrain --dropout 0.5 --prior-sigma 1.0 --epochs 50 \\
         --select-by combo --mc-eval-samples 10 --mc-eval-every 1
 """
 import argparse
@@ -33,7 +19,7 @@ from pathlib import Path
 import numpy as np
 
 # Make the project root and the UQ package importable whether run as a module
-# or as a plain script (mirrors run_mc_dropout.py).
+# or as a plain script (mirrors train_mc_dropout.py).
 _THIS = Path(__file__).resolve()
 _UQ_DIR = _THIS.parent.parent
 _PROJECT_ROOT = _UQ_DIR.parent
@@ -41,82 +27,48 @@ for _p in (str(_PROJECT_ROOT), str(_UQ_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import torch  # noqa: E402
-import torch.nn as nn  # noqa: E402
-import torch.optim as optim  # noqa: E402
-from tqdm import tqdm  # noqa: E402
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from tqdm import tqdm
 
-from common.paths import method_results_dir, ensure_project_on_path  # noqa: E402
-from common.inference import enable_dropout, mc_forward_passes, denormalize  # noqa: E402
-from common.uq_metrics import picp, mpiw  # noqa: E402
-from common.calibration import fit_temperature, save_calibration  # noqa: E402
+from common.paths import method_results_dir, ensure_project_on_path
+from common.inference import mc_forward_passes, denormalize
+from common.uq_metrics import picp, mpiw
+from common.calibration import fit_temperature, save_calibration
+from bnn.bnn_model import build_bnn_model, enable_bnn_sampling
 
 ensure_project_on_path()
 
-from config import OUTPUT_DIR  # noqa: E402
-from data_loader import load_data, build_datasets, build_eval_loader  # noqa: E402
-from model import build_multi_input_model  # noqa: E402
-from train import select_device, move_training_to_cpu  # noqa: E402
+from config import OUTPUT_DIR
+from data_loader import load_data, build_datasets, build_eval_loader
+from train import select_device, move_training_to_cpu
 
-METHOD_NAME = "mc_dropout"
+METHOD_NAME = "bnn"
 
 # z for a 90% two-sided Gaussian interval (matches common.inference.Z_SCORES).
 Z90 = 1.645
 
 
 def mc_eval_calib(model, calib_loader, y_true_calib, max_age, device, samples):
-    """Run MC Dropout on the calib split and return calibrated UQ stats.
+    """Run Monte Carlo sampling on the calib split and return calibrated UQ stats.
 
-    This function performs Monte Carlo Dropout inference on the calibration set
-    to evaluate the current model checkpoint's uncertainty quality. By enabling
-    dropout at test time and drawing multiple samples, we can estimate both the
-    predictive mean (point prediction) and predictive standard deviation (raw epistemic
-    uncertainty). We then calibrate these raw standard deviations post-hoc using
-    temperature scaling.
-
-    Args:
-        model (nn.Module): The PyTorch model to evaluate.
-        calib_loader (DataLoader): DataLoader for the calibration dataset.
-        y_true_calib (np.ndarray): True target values (bone ages in months) for the calibration set.
-        max_age (float): Maximum age used for de-normalizing predictions.
-        device (torch.device): Device (CPU/GPU) to run inference on.
-        samples (int): Number of stochastic forward passes (T) per sample.
-
-    Returns:
-        dict: A dictionary containing:
-            - "std_scale": The fitted temperature scaling factor.
-            - "picp90": Prediction Interval Coverage Probability at 90% nominal confidence.
-            - "mpiw90": Mean Prediction Interval Width at 90% nominal confidence (in months).
-            - "mae": Mean Absolute Error of the MC-mean predictions (in months).
+    Returns a dict with the fitted temperature plus the calibrated PICP@90,
+    MPIW@90 and the MC-mean MAE (all in months). Restores ``model.train()``
+    before returning so the caller can keep training.
     """
-    # 1. Force the dropout layers to remain active during forward passes.
-    # By default, model.eval() disables dropout. enable_dropout() keeps the rest of the
-    # model in eval mode (e.g. BatchNorm) but enables dropout layers.
-    enable_dropout(model)
-    
-    # 2. Perform T stochastic forward passes. This returns a tensor of shape [T, N, 1].
+    enable_bnn_sampling(model)
     preds_norm, _ = mc_forward_passes(model, calib_loader, device, samples)
-    
-    # 3. Restore training mode so the caller (main training loop) can continue training.
     model.train()
 
-    # 4. Compute sample statistics (mean and std) across the T stochastic passes.
-    # Mean represents the point prediction; Standard Deviation represents raw uncertainty.
-    # The output is de-normalized from [0, 1] back to the original unit (months).
     pred_mean = denormalize(preds_norm.mean(axis=0), max_age)
     pred_std = denormalize(preds_norm.std(axis=0), max_age)
 
-    # 5. Fit post-hoc temperature scaling (a single multiplier for standard deviation).
-    # This solves for a scale factor `s` such that `pred_std * s` leads to the expected
-    # empirical coverage (90%) of the Gaussian intervals.
     scale = fit_temperature(y_true_calib, pred_mean, pred_std)
     std_cal = pred_std * scale
-    
-    # 6. Build the 90% prediction intervals: [mean - 1.645 * std_cal, mean + 1.645 * std_cal].
     lower = pred_mean - Z90 * std_cal
     upper = pred_mean + Z90 * std_cal
 
-    # 7. Compute and return the point accuracy and interval metrics.
     return {
         "std_scale": scale,
         "picp90": picp(y_true_calib, lower, upper),
@@ -126,58 +78,37 @@ def mc_eval_calib(model, calib_loader, y_true_calib, max_age, device, samples):
 
 
 def selection_score(select_by, val_mae, uq, mae_weight):
-    """Lower-is-better score for checkpoint selection.
-
-    During training, we want to save the checkpoint that has the best balance
-    of point prediction performance and uncertainty quality. This function
-    calculates a single score based on the chosen criterion.
-
-    Args:
-        select_by (str): The metric used for selection. One of:
-            - "val_mae": Standard validation MAE (non-MC).
-            - "picp90": Absolute deviation of calibration coverage from 90%.
-            - "mpiw90": Calibration Mean Prediction Interval Width (minimizes width).
-            - "combo": Combined score minimizing MPIW@90 with a penalty for MAE degradation.
-        val_mae (float): Mean Absolute Error on validation set.
-        uq (dict): Uncertainty metrics from mc_eval_calib (or None if skipped).
-        mae_weight (float): Multiplier for MAE in the "combo" metric.
-
-    Returns:
-        float or None: Lower-is-better selection score.
-    """
+    """Lower-is-better score for checkpoint selection."""
     if select_by == "val_mae":
-        # Standard PyTorch training criterion: choose model with lowest validation MAE.
         return val_mae
     if uq is None:
         return None
     if select_by == "picp90":
-        # Select model whose empirical coverage on calibration set is closest to 90%.
         return abs(uq["picp90"] - 0.90)
     if select_by == "mpiw90":
-        # Select model with the narrowest prediction intervals.
         return uq["mpiw90"]
     if select_by == "combo":
-        # Since post-hoc temperature scaling already forces coverage (PICP) to ~90%,
-        # the quality of uncertainty is measured by how narrow the intervals are (MPIW).
-        # We trade off narrowness (uq["mpiw90"]) against point accuracy (uq["mae"])
-        # to ensure that we don't select a model that has narrow intervals but poor accuracy.
         return uq["mpiw90"] + mae_weight * uq["mae"]
     raise ValueError(f"Unknown --select-by '{select_by}'")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="UQ-aware MC Dropout training for the bone age model"
+        description="UQ-aware BNN training for the bone age model"
     )
     parser.add_argument("--quick-test", action="store_true",
                         help="Run with 1%% of data and 2 epochs for a smoke test")
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--output-name", type=str, default="uqtrain",
+    parser.add_argument("--output-name", type=str, default="bnn",
                         help="Prefix for output files")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--dropout", type=float, default=0.5,
-                        help="Dropout rate for the model head (drives MC variance)")
+                        help="Dropout rate for the model head")
+    parser.add_argument("--prior-sigma", type=float, default=1.0,
+                        help="Standard deviation for the Gaussian prior of variational weights")
+    parser.add_argument("--kl-weight", type=float, default=1.0,
+                        help="Multiplier for the KL divergence term in the ELBO loss")
     parser.add_argument("--select-by", type=str, default="combo",
                         choices=["val_mae", "picp90", "mpiw90", "combo"],
                         help="Checkpoint selection criterion (lower is better)")
@@ -204,9 +135,9 @@ def main():
     run_dir = OUTPUT_DIR / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Starting UQ-aware run: {run_name}")
+    print(f"Starting UQ-aware BNN run: {run_name}")
     print(f"Using {sample_frac*100}% of data for {epochs} epochs "
-          f"(dropout={args.dropout}, select-by={args.select_by}).")
+          f"(dropout={args.dropout}, prior_sigma={args.prior_sigma}, kl_weight={args.kl_weight}, select-by={args.select_by}).")
 
     print("Loading data...")
     train_df, val_df, calib_df, test_df, max_age = load_data(sample_frac=sample_frac)
@@ -217,9 +148,10 @@ def main():
     train_loader, val_loader = build_datasets(train_df, val_df)
     calib_loader = build_eval_loader(calib_df)
     y_true_calib = calib_df["boneage_norm"].values * max_age
+    num_train_samples = len(train_loader.dataset)
 
     print("Building model...")
-    model = build_multi_input_model(dropout=args.dropout)
+    model = build_bnn_model(dropout=args.dropout, prior_sigma=args.prior_sigma)
     criterion = nn.SmoothL1Loss()
     device, model = select_device(model, train_loader, criterion)
     print(f"Using device: {device}")
@@ -232,15 +164,16 @@ def main():
 
     best_score = float('inf')
     best_uq = None
-    history = {'loss': [], 'val_mae': [], 'calib_picp90': [],
+    history = {'loss': [], 'nll_loss': [], 'kl_loss': [], 'val_mae': [], 'calib_picp90': [],
                'calib_mpiw90': [], 'calib_std_scale': [], 'score': []}
     checkpoint_path = None
 
     print("Starting training...")
     for epoch in range(epochs):
-        # --- TRAINING PHASE ---
         model.train()
         train_loss = 0.0
+        train_nll = 0.0
+        train_kl = 0.0
 
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
         for batch in progress_bar:
@@ -250,14 +183,15 @@ def main():
             targets = targets.to(device)
 
             try:
-                # Standard forward and backward pass
                 optimizer.zero_grad()
                 outputs = model(img, sex)
-                loss = criterion(outputs, targets)
+                nll = criterion(outputs, targets)
+                kl = model.kl_loss()
+                # ELBO loss = NLL + kl_weight * (KL / N)
+                loss = nll + args.kl_weight * (kl / num_train_samples)
                 loss.backward()
                 optimizer.step()
             except RuntimeError as exc:
-                # OOM recovery: switch to CPU training dynamically to avoid crash
                 if device.type != "cuda" or "out of memory" not in str(exc).lower():
                     raise
                 print("  warning: GPU OOM during training; switching to CPU.")
@@ -268,18 +202,23 @@ def main():
                 targets = targets.to(device)
                 optimizer.zero_grad()
                 outputs = model(img, sex)
-                loss = criterion(outputs, targets)
+                nll = criterion(outputs, targets)
+                kl = model.kl_loss()
+                loss = nll + args.kl_weight * (kl / num_train_samples)
                 loss.backward()
                 optimizer.step()
 
-            train_loss += loss.item() * img.size(0)
-            progress_bar.set_postfix({'loss': loss.item()})
+            batch_size = img.size(0)
+            train_loss += loss.item() * batch_size
+            train_nll += nll.item() * batch_size
+            train_kl += kl.item() * batch_size
+            progress_bar.set_postfix({'loss': loss.item(), 'nll': nll.item(), 'kl': kl.item()})
 
-        train_loss /= len(train_loader.dataset)
+        train_loss /= num_train_samples
+        train_nll /= num_train_samples
+        train_kl /= num_train_samples
 
-        # --- STANDARD VALIDATION PHASE ---
-        # Run standard validation with dropout turned off (model.eval())
-        # to monitor the baseline point prediction accuracy (MAE).
+        # Standard (deterministic mean) validation MAE.
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
@@ -293,52 +232,46 @@ def main():
         val_loss /= len(val_loader.dataset)
         val_mae = val_loss * max_age  # report in months
 
-        # --- UQ-AWARE EVALUATION PHASE ---
-        # If selection requires UQ stats (not just simple val_mae) and it's the correct epoch,
-        # perform Monte Carlo evaluation on the calibration split.
+        # UQ-aware calib eval (BNN MC sampling + post-hoc temperature).
         run_mc = (args.select_by != "val_mae") and ((epoch + 1) % args.mc_eval_every == 0)
         uq = None
         if run_mc:
-            # Performs stochastic forward passes, fits temperature scaling, and measures PICP/MPIW
             uq = mc_eval_calib(model, calib_loader, y_true_calib, max_age,
                                device, args.mc_eval_samples)
 
-        # Calculate checkpoint selection score
         score = selection_score(args.select_by, val_mae, uq, args.mae_weight)
 
         current_lr = optimizer.param_groups[0]['lr']
-        msg = (f"Epoch {epoch+1}/{epochs} - loss: {train_loss:.4f} - "
+        msg = (f"Epoch {epoch+1}/{epochs} - loss: {train_loss:.4f} (nll:{train_nll:.4f}, kl:{train_kl:.4f}) - "
                f"val_mae: {val_mae:.3f} mo - lr: {current_lr:.6f}")
         if uq is not None:
             msg += (f" | calib PICP@90: {uq['picp90']*100:.1f}% "
-                     f"MPIW@90: {uq['mpiw90']:.2f} mo (s={uq['std_scale']:.3f})")
+                    f"MPIW@90: {uq['mpiw90']:.2f} mo (s={uq['std_scale']:.3f})")
         if score is not None:
             msg += f" | score: {score:.4f}"
         print(msg)
 
         history['loss'].append(train_loss)
+        history['nll_loss'].append(train_nll)
+        history['kl_loss'].append(train_kl)
         history['val_mae'].append(val_mae)
         history['calib_picp90'].append(uq['picp90'] if uq else None)
         history['calib_mpiw90'].append(uq['mpiw90'] if uq else None)
         history['calib_std_scale'].append(uq['std_scale'] if uq else None)
         history['score'].append(score)
 
-        # Learning rate scheduler steps based on point-prediction validation loss
         scheduler.step(val_loss)
 
-        # Save checkpoint if the selection score improved
         if score is not None and score < best_score:
             new_path = run_dir / f"best_{run_name}_ep{epoch+1:02d}_score{score:.4f}.pth"
             print(f"  score improved {best_score:.4f} -> {score:.4f}, saving {new_path}")
             best_score = score
             best_uq = uq
-            # Keep only the single best checkpoint to save disk space
             if checkpoint_path and checkpoint_path.exists():
                 checkpoint_path.unlink()
             checkpoint_path = new_path
             torch.save(model.state_dict(), checkpoint_path)
 
-    # Restore the weights from the best epoch for post-training calibration and evaluation
     if checkpoint_path and checkpoint_path.exists():
         print(f"Restoring best weights from {checkpoint_path}")
         model.load_state_dict(torch.load(checkpoint_path))
@@ -348,16 +281,11 @@ def main():
         pickle.dump(history, f)
     print(f"Saved training history to {history_path}")
 
-    # --- DEFINITIVE CALIBRATION ---
-    # Fit the final calibration temperature on the calibration set using more MC samples
-    # to reduce sampling noise. This creates a calibration parameter that will scale
-    # prediction intervals during inference/testing.
+    # Definitive calibration on calib with more MC passes, saved where
+    # run_bnn.py --calibration auto can find it.
     print(f"Fitting final calibration on calib ({args.final_samples} MC passes)...")
     final_uq = mc_eval_calib(model, calib_loader, y_true_calib, max_age,
                              device, args.final_samples)
-    
-    # Save the calibration scale factor to a JSON file so that run_mc_dropout.py
-    # can automatically load and apply it during test-set evaluation.
     cal_dir = method_results_dir(METHOD_NAME)
     cal_path = save_calibration(
         cal_dir, final_uq["std_scale"], split="calib", n=len(calib_df),
@@ -368,16 +296,18 @@ def main():
             "checkpoint": checkpoint_path.name if checkpoint_path else None,
             "run_name": run_name,
             "dropout": args.dropout,
+            "prior_sigma": args.prior_sigma,
+            "kl_weight": args.kl_weight,
         },
     )
     print(f"Final calib temperature {final_uq['std_scale']:.4f} -> {cal_path}")
     print(f"Final calib PICP@90: {final_uq['picp90']*100:.1f}% | "
           f"MPIW@90: {final_uq['mpiw90']:.2f} mo | MAE: {final_uq['mae']:.2f} mo")
 
-    print("\nUQ-aware training completed.")
+    print("\nUQ-aware BNN training completed.")
     print("Next: evaluate the test split with the fitted calibration:")
     ckpt = checkpoint_path.name if checkpoint_path else "<checkpoint>.pth"
-    print(f"  python -m UQ.mc_dropout.run_mc_dropout "
+    print(f"  python -m UQ.bnn.run_bnn "
           f"--checkpoint {run_dir / ckpt} --split test "
           f"--samples {args.final_samples} --calibration auto")
 

@@ -1,0 +1,10 @@
+{
+  "std_scale": 0.8038895128203972,
+  "split": "calib",
+  "n": 3153,
+  "timestamp": "20260624_151619",
+  "method": "bnn",
+  "source": "fit",
+  "samples": 30,
+  "checkpoint": "best_bnn_seed42_quicktest_ep02_score279.0595.pth"
+}

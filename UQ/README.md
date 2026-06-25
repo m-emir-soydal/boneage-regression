@@ -6,11 +6,10 @@ exactly as-is; UQ methods wrap inference around a trained checkpoint and are
 all compared on the **same metrics** so different approaches can be ranked
 fairly.
 
-Currently implemented methods: **Monte Carlo (MC) Dropout** and
-**Heteroscedastic Regression**. More methods (Bayesian neural network,
-conformal prediction, deep ensembles, ...) plug in the same way. A
-`compare.py` aggregates every method's results into one ranked table on the
-shared metrics.
+Currently implemented methods: **Monte Carlo (MC) Dropout**, **Heteroscedastic
+Regression**, and **Bayesian Neural Network (BNN)**. More methods (conformal
+prediction, deep ensembles, ...) plug in the same way. A `compare.py` aggregates
+every method's results into one ranked table on the shared metrics.
 
 ## Why a separate folder
 
@@ -40,9 +39,15 @@ UQ/
 │   ├── train_hetero.py        # Heteroscedastic training (single-pass UQ model)
 │   ├── run_hetero.py          # Single-pass evaluation (+ post-hoc calibration)
 │   └── run_hetero.sh          # conda-activating train+calib+test wrapper
+├── bnn/
+│   ├── bnn_model.py           # EfficientNet-B3 + sex, with variational dense head
+│   ├── train_bnn.py           # ELBO training loop (UQ-aware checkpoint selection)
+│   ├── run_bnn.py             # Monte Carlo evaluation (+ post-hoc calibration)
+│   └── run_bnn.sh             # conda-activating train+calib+test wrapper
 └── results/
     ├── mc_dropout/            # grouped CSV outputs for this method
     ├── heteroscedastic/       # grouped CSV outputs for this method
+    ├── bnn/                   # grouped CSV outputs for this method
     └── comparison_<ts>.csv    # cross-method comparison table
 ```
 
@@ -281,6 +286,52 @@ Written to `UQ/results/heteroscedastic/`:
   shared schema below.
 - `calibration_<ts>.json` (with `--fit-calibration`).
 
+## Bayesian Neural Network (BNN)
+
+The Bayesian Neural Network method captures **epistemic uncertainty** by replacing the fully-connected regression head (`fc1` and `out`) with `VariationalLinear` layers (Bayes by Backprop, Blundell et al. 2015). The pre-trained EfficientNet-B3 backbone remains deterministic to ensure tractable and stable training.
+
+During training, it optimizes the Evidence Lower Bound (ELBO):
+
+```
+L_ELBO = SmoothL1Loss(y, y_pred) + kl_weight * (KL / N_train)
+```
+
+At inference, weights are sampled from the variational posterior across `T` stochastic forward passes.
+
+### Run it
+
+```bash
+conda activate rsna-boneage
+
+# 1. Train (writes checkpoint under OUTPUT_DIR/<run_name>/)
+python -m UQ.bnn.train_bnn \
+    --output-name bnn --seed 42 --epochs 50 --prior-sigma 1.0 --kl-weight 1.0
+
+# 2. Fit calibration on the held-out calib split
+python -m UQ.bnn.run_bnn \
+    --checkpoint outputs/bnn_seed42/best_*.pth \
+    --split calib --fit-calibration
+
+# 3. Evaluate the test split with that calibration applied
+python -m UQ.bnn.run_bnn \
+    --checkpoint outputs/bnn_seed42/best_*.pth \
+    --split test --calibration auto
+```
+
+Or one shot via the wrapper:
+
+```bash
+bash UQ/bnn/run_bnn.sh --output-name bnn --seed 42 --epochs 50
+```
+
+### Outputs
+
+Written to `UQ/results/bnn/`:
+
+- `bnn_<split>_predictions_<ts>.csv` — columns: `id, sex, true_age, pred_mean, pred_std, std_scale, lower90, upper90, lower95, upper95, covered90, covered95`.
+- `bnn_<split>_metrics_<ts>.csv` — one comparison row using the shared schema.
+- `calibration_<ts>.json` (with `--fit-calibration`).
+
 ## Comparing methods
 
 Once two or more methods have written metrics, aggregate them:
@@ -320,11 +371,9 @@ concatenate every `UQ/results/*/*_metrics_*.csv` into a single table.
 
 ## Roadmap
 
-- **Bayesian neural network** — to be reimplemented (a previous variational
-  last-layer head was removed pending a better implementation).
 - **Conformal prediction** — distribution-free intervals calibrated on the
   currently-unused `calib_df` split from `data_loader.load_data()`.
 - **Deep ensembles** — train multiple seeds (the project already supports
   per-seed runs) and aggregate predictive variance.
 
-Implemented: **MC Dropout**, **Heteroscedastic Regression**.
+Implemented: **MC Dropout**, **Heteroscedastic Regression**, **Bayesian Neural Network**.

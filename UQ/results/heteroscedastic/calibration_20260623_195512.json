@@ -1,0 +1,12 @@
+{
+  "std_scale": 0.4491827910858409,
+  "split": "calib",
+  "n": 3153,
+  "timestamp": "20260623_195512",
+  "method": "heteroscedastic",
+  "source": "hetero_train",
+  "checkpoint": "best_hetero_v1_seed42_ep14_score8.6969.pth",
+  "run_name": "hetero_v1_seed42",
+  "dropout": 0.5,
+  "mae_weight": 0.01
+}

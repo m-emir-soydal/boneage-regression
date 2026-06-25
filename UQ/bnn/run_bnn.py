@@ -1,13 +1,13 @@
-"""Monte Carlo Dropout uncertainty quantification.
+"""Bayesian Neural Network uncertainty quantification.
 
-Reuses an existing trained regression checkpoint (.pth), runs T stochastic
-forward passes with dropout active at inference, builds Gaussian prediction
-intervals, and reports PICP@90/95 and MPIW@90/95 alongside the usual point
-metrics. Outputs are written under ``UQ/results/mc_dropout/``.
+Reuses an existing trained BNN checkpoint (.pth), runs T stochastic forward passes
+with variational sampling active at inference, builds Gaussian prediction intervals,
+and reports PICP@90/95 and MPIW@90/95 alongside the usual point metrics. Outputs
+are written under ``UQ/results/bnn/``.
 
 Example:
-    python -m UQ.mc_dropout.run_mc_dropout \\
-        --checkpoint outputs/run_seed123/best_run_seed123_ep12_val0.123.pth \\
+    python -m UQ.bnn.run_bnn \\
+        --checkpoint outputs/bnn_seed42/best_bnn_seed42_ep12_score0.123.pth \\
         --samples 30 --split test
 """
 import argparse
@@ -27,17 +27,16 @@ for _p in (str(_PROJECT_ROOT), str(_UQ_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import torch  # noqa: E402
+import torch
 
-from common.paths import method_results_dir, ensure_project_on_path  # noqa: E402
-from common.inference import (  # noqa: E402
-    enable_dropout,
+from common.paths import method_results_dir, ensure_project_on_path
+from common.inference import (
     gaussian_intervals,
     denormalize,
     mc_forward_passes,
 )
-from common.uq_metrics import summarize  # noqa: E402
-from common.calibration import (  # noqa: E402
+from common.uq_metrics import summarize
+from common.calibration import (
     fit_temperature,
     apply_temperature,
     save_calibration,
@@ -46,14 +45,13 @@ from common.calibration import (  # noqa: E402
 
 ensure_project_on_path()
 
-from data_loader import load_data, build_eval_loader  # noqa: E402
-from model import build_multi_input_model  # noqa: E402
+from data_loader import load_data, build_eval_loader
+from bnn.bnn_model import build_bnn_model, enable_bnn_sampling
 
-METHOD_NAME = "mc_dropout"
+METHOD_NAME = "bnn"
 
 
 def select_split(split, train_df, val_df, calib_df, test_df):
-    """Helper function to retrieve the correct dataframe split by string name."""
     mapping = {
         "train": train_df,
         "val": val_df,
@@ -67,7 +65,7 @@ def select_split(split, train_df, val_df, calib_df, test_df):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Monte Carlo Dropout UQ over a trained bone age model"
+        description="Bayesian Neural Network UQ over a trained bone age model"
     )
     parser.add_argument("--checkpoint", type=str, required=True,
                         help="Path to a trained .pth model checkpoint")
@@ -78,6 +76,8 @@ def main():
                         help="Which data split to evaluate on")
     parser.add_argument("--output-name", type=str, default=METHOD_NAME,
                         help="Prefix for output files")
+    parser.add_argument("--prior-sigma", type=float, default=1.0,
+                        help="Standard deviation for the Gaussian prior of variational weights")
     parser.add_argument("--fit-calibration", action="store_true",
                         help="Fit a post-hoc std temperature on THIS split "
                              "(run with --split calib) and save it for reuse")
@@ -87,7 +87,6 @@ def main():
                              "'auto' to use the most recent one")
     args = parser.parse_args()
 
-    # 1. Load dataset splits and select the target split for evaluation
     print("Loading data...")
     train_df, val_df, calib_df, test_df, max_age = load_data(sample_frac=1.0)
     df = select_split(args.split, train_df, val_df, calib_df, test_df)
@@ -98,42 +97,32 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # 2. Load the pre-trained weights into the model
     print(f"Loading model weights from {args.checkpoint}")
-    model = build_multi_input_model()
+    model = build_bnn_model(prior_sigma=args.prior_sigma)
     model.load_state_dict(torch.load(args.checkpoint, map_location=device))
     model = model.to(device)
 
-    # 3. CRITICAL: Enable dropout layers during inference.
-    # Standard PyTorch models turn off dropout in eval mode (model.eval()).
-    # enable_dropout() keeps the dropout layers active, which allows us to draw
-    # stochastically different forward pass outputs for the same input.
-    enable_dropout(model)
+    # Keep variational layers active at inference for MC sampling.
+    enable_bnn_sampling(model)
 
-    # 4. Perform T stochastic forward passes
-    # mc_forward_passes draws T forward passes, returning predictions of shape [T, N, 1]
     print(f"Running {args.samples} stochastic forward passes...")
     preds_norm, _ = mc_forward_passes(model, loader, device, args.samples)
 
-    # 5. Compute sample statistics (mean and std) across the T passes.
-    # The mean acts as the ensemble point prediction.
-    # The standard deviation represents the epistemic uncertainty (spread of the dropout outputs).
-    # We de-normalize both statistics from [0, 1] space to months.
+    # Per-sample statistics across the T passes (normalized space), then de-normalize.
     mean_norm = preds_norm.mean(axis=0)
     std_norm = preds_norm.std(axis=0)
 
     pred_mean = denormalize(mean_norm, max_age)
     pred_std = denormalize(std_norm, max_age)
 
-    # Ground truth targets
+    # Ground truth is read directly from the (unshuffled) dataframe to avoid
+    # any ambiguity in target ordering.
     y_true = df["boneage_norm"].values * max_age
 
     out_dir = method_results_dir(METHOD_NAME)
 
-    # 6. Apply a pre-fitted calibration temperature.
-    # Standard deviation computed from dropout is often under- or over-confident.
-    # We apply a scaling factor `s` (temperature) to obtain `std_eff = pred_std * s`
-    # so that the resulting Gaussian intervals hit their target coverage (e.g. 90% or 95%).
+    # Apply a previously-fitted temperature (widens/tightens the raw BNN
+    # std so the intervals actually reach their nominal coverage).
     std_scale = 1.0
     if args.calibration:
         payload, cal_path = resolve_calibration(args.calibration, out_dir)
@@ -141,12 +130,12 @@ def main():
         print(f"Applying calibration temperature {std_scale:.4f} from {cal_path}")
     std_eff = apply_temperature(pred_std, std_scale)
 
-    # 7. Generate Gaussian prediction intervals using the calibrated standard deviation
-    # lower/upper = mean +/- Z * std_eff
     lower90, upper90 = gaussian_intervals(pred_mean, std_eff, 90)
     lower95, upper95 = gaussian_intervals(pred_mean, std_eff, 95)
 
-    # 8. Fit and save a new calibration temperature if requested (usually done on the calib split)
+    # Fit a fresh temperature on this split (intended for --split calib). This
+    # is fit on the RAW std so the saved scale is independent of any already
+    # applied calibration.
     if args.fit_calibration:
         fitted_scale = fit_temperature(y_true, pred_mean, pred_std)
         cal_path = save_calibration(
@@ -161,7 +150,6 @@ def main():
         print(f"Fitted std temperature {fitted_scale:.4f} on '{args.split}' "
               f"({len(df)} samples) -> saved to {cal_path}")
 
-    # 9. Compute summary metrics: MAE, RMSE, R2, PICP (coverage), MPIW (interval width)
     row = summarize(
         METHOD_NAME, y_true, pred_mean,
         lower90, upper90, lower95, upper95,
@@ -174,7 +162,7 @@ def main():
         },
     )
 
-    print(f"\n--- MC Dropout ({args.split}) Metrics ---")
+    print(f"\n--- BNN ({args.split}) Metrics ---")
     print(f"MAE:      {row['MAE']:.2f} months")
     print(f"RMSE:     {row['RMSE']:.2f} months")
     print(f"R2:       {row['R2']:.3f}")
@@ -184,7 +172,6 @@ def main():
     print(f"MPIW@95:  {row['MPIW_95']:.2f} months")
     print("----------------------------------\n")
 
-    # 10. Save individual predictions and overall summary metrics as CSV files
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     covered90 = (y_true >= lower90) & (y_true <= upper90)
@@ -212,7 +199,7 @@ def main():
     metrics_df.to_csv(metrics_path, index=False)
     print(f"Saved metrics to:     {metrics_path}")
 
-    print("MC Dropout evaluation completed.")
+    print("BNN evaluation completed.")
 
 
 if __name__ == "__main__":

@@ -74,7 +74,12 @@ def select_split(split, train_df, val_df, calib_df, test_df):
 
 @torch.no_grad()
 def hetero_forward(model, loader, device):
-    """Single deterministic pass; returns ``(mean, std)`` arrays (normalized)."""
+    """Single deterministic pass; returns ``(mean, std)`` arrays (normalized).
+
+    Unlike MC Dropout, we only need to pass each input through the network once
+    because the network outputs the standard deviation (from log-variance)
+    directly as part of its predictions.
+    """
     model.eval()
     means = []
     stds = []
@@ -82,9 +87,16 @@ def hetero_forward(model, loader, device):
         inputs, _ = batch
         img = inputs["image_input"].to(device)
         sex = inputs["sex_input"].to(device)
+        
+        # 1. Predict mean and log-variance
         mean, log_var = model(img, sex)
+        
+        # 2. Clamp log-variance to avoid numerical instability
         log_var = clamp_log_var(log_var)
+        
+        # 3. Convert log-variance to standard deviation: std = exp(0.5 * log_var)
         std = torch.exp(0.5 * log_var)
+        
         means.append(mean.cpu().numpy().reshape(-1))
         stds.append(std.cpu().numpy().reshape(-1))
     return np.concatenate(means), np.concatenate(stds)
@@ -114,6 +126,7 @@ def main():
                              "'auto' to use the most recent one")
     args = parser.parse_args()
 
+    # 1. Load splits and select the target split for evaluation
     print("Loading data...")
     train_df, val_df, calib_df, test_df, max_age = load_data(sample_frac=1.0)
     df = select_split(args.split, train_df, val_df, calib_df, test_df)
@@ -124,23 +137,29 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
+    # 2. Initialize the model and load the weights
     print(f"Loading model weights from {args.checkpoint}")
     model = build_hetero_model(dropout=args.dropout)
     model.load_state_dict(torch.load(args.checkpoint, map_location=device))
     model = model.to(device)
 
+    # 3. Perform a single deterministic forward pass to get mean and standard deviation
     print("Running single deterministic forward pass...")
     mean_norm, std_norm = hetero_forward(model, loader, device)
 
+    # 4. De-normalize predictions from normalized [0, 1] space to months
     pred_mean = denormalize(mean_norm, max_age)
     pred_std = denormalize(std_norm, max_age)
 
-    # Ground truth from the (unshuffled) dataframe -> avoids any ambiguity in
-    # target ordering vs the eval loader. Matches run_mc_dropout.py.
+    # Ground truth labels (unshuffled)
     y_true = df["boneage_norm"].values * max_age
 
     out_dir = method_results_dir(METHOD_NAME)
 
+    # 5. Apply the calibration temperature.
+    # Raw predicted standard deviations are often over- or under-confident.
+    # The temperature scale multiplier resolves this by scaling standard deviation:
+    # `std_eff = pred_std * std_scale`
     std_scale = 1.0
     if args.calibration:
         payload, cal_path = resolve_calibration(args.calibration, out_dir)
@@ -148,12 +167,11 @@ def main():
         print(f"Applying calibration temperature {std_scale:.4f} from {cal_path}")
     std_eff = apply_temperature(pred_std, std_scale)
 
+    # 6. Generate Gaussian prediction intervals: lower/upper = mean +/- Z * std_eff
     lower90, upper90 = gaussian_intervals(pred_mean, std_eff, 90)
     lower95, upper95 = gaussian_intervals(pred_mean, std_eff, 95)
 
-    # Fit a fresh temperature on this split (intended for --split calib).
-    # Always fit on the RAW std so the saved scale is independent of any
-    # already-applied calibration. Mirrors run_mc_dropout.py.
+    # 7. Fit a new calibration temperature on this split if requested
     if args.fit_calibration:
         fitted_scale = fit_temperature(y_true, pred_mean, pred_std)
         cal_path = save_calibration(
@@ -167,6 +185,7 @@ def main():
         print(f"Fitted std temperature {fitted_scale:.4f} on '{args.split}' "
               f"({len(df)} samples) -> saved to {cal_path}")
 
+    # 8. Compute point accuracy (MAE/RMSE/R2) and UQ metrics (PICP/MPIW)
     row = summarize(
         METHOD_NAME, y_true, pred_mean,
         lower90, upper90, lower95, upper95,
@@ -188,6 +207,7 @@ def main():
     print(f"MPIW@95:  {row['MPIW_95']:.2f} months")
     print("------------------------------------------\n")
 
+    # 9. Save predictions and summary metrics as CSV files
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     covered90 = (y_true >= lower90) & (y_true <= upper90)

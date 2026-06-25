@@ -75,6 +75,11 @@ def _select_device_hetero(model, train_loader, mae_weight):
     Mirrors ``train.select_device`` but invokes the heteroscedastic forward
     (which returns ``(mean, log_var)``) so the probe actually exercises the
     real model + loss path.
+    
+    This function prevents GPU Out Of Memory (OOM) failures early in execution
+    by verifying that the GPU has enough free memory (at least 4 GiB) and running
+    a single test forward/backward/optimizer step. If any part of this fails
+    due to OOM, it defaults to CPU training.
     """
     if not torch.cuda.is_available():
         return torch.device("cpu"), model
@@ -87,6 +92,7 @@ def _select_device_hetero(model, train_loader, mae_weight):
             print(f"  warning: GPU has only {free_gb:.1f} GiB free; using CPU.")
             return torch.device("cpu"), model
 
+        # Move to CUDA and do a single test optimization step
         model = model.cuda().train()
         probe_opt = optim.Adam(model.parameters(), lr=1e-4)
         inputs, targets = next(iter(train_loader))
@@ -100,6 +106,7 @@ def _select_device_hetero(model, train_loader, mae_weight):
         loss.backward()
         probe_opt.step()
 
+        # Clean up temporary tensors to free GPU memory
         del probe_opt, mean, log_var, loss, img, sex, targets, inputs
         model.zero_grad(set_to_none=True)
         torch.cuda.empty_cache()
@@ -114,7 +121,11 @@ def _select_device_hetero(model, train_loader, mae_weight):
 
 @torch.no_grad()
 def _eval_val_mae(model, val_loader, device, max_age):
-    """Return validation MAE in **months** from a single deterministic pass."""
+    """Return validation MAE in **months** from a single deterministic pass.
+
+    Uses only the predicted mean head (`mean`), completely ignoring the
+    predicted uncertainty log-variance, to calculate standard L1 error.
+    """
     model.eval()
     total = 0.0
     n = 0
@@ -135,6 +146,10 @@ def _hetero_predict(model, loader, device):
 
     Both arrays are in **normalized** target space; denormalize with
     ``common.inference.denormalize`` before computing metrics in months.
+    
+    Unlike Monte Carlo Dropout which requires running multiple stochastic passes,
+    the heteroscedastic method produces the mean and variance in a single,
+    deterministic forward pass, which makes inference highly efficient.
     """
     model.eval()
     means = []
@@ -143,9 +158,16 @@ def _hetero_predict(model, loader, device):
         inputs, _ = batch
         img = inputs["image_input"].to(device)
         sex = inputs["sex_input"].to(device)
+        
+        # 1. Forward pass extracts mean and log-variance
         mean, log_var = model(img, sex)
+        
+        # 2. Clamp log-variance to prevent numerical explosion
         log_var = clamp_log_var(log_var)
+        
+        # 3. Convert log-variance back to standard deviation: std = exp(0.5 * log_var)
         std = torch.exp(0.5 * log_var)
+        
         means.append(mean.cpu().numpy().reshape(-1))
         stds.append(std.cpu().numpy().reshape(-1))
     return np.concatenate(means), np.concatenate(stds)
@@ -156,16 +178,27 @@ def hetero_eval_calib(model, calib_loader, y_true_calib, max_age, device):
 
     Returns a dict with the fitted temperature plus the calibrated PICP@90,
     MPIW@90 and MAE (all in months).
+    
+    Calibration ensures that the predicted uncertainty actually corresponds to
+    the empirical error rate (i.e. a 90% prediction interval contains exactly 90%
+    of the true targets).
     """
+    # 1. Obtain normalized point predictions (mean) and uncertainty (std)
     mean_norm, std_norm = _hetero_predict(model, calib_loader, device)
+    
+    # 2. De-normalize to months
     pred_mean = denormalize(mean_norm, max_age)
     pred_std = denormalize(std_norm, max_age)
 
+    # 3. Solve for standard deviation multiplier (temperature scale) `s`
     scale = fit_temperature(y_true_calib, pred_mean, pred_std)
     std_cal = pred_std * scale
+    
+    # 4. Form prediction intervals
     lower = pred_mean - Z90 * std_cal
     upper = pred_mean + Z90 * std_cal
 
+    # 5. Measure coverage (PICP), mean interval width (MPIW), and MAE
     return {
         "std_scale": scale,
         "picp90": picp(y_true_calib, lower, upper),
@@ -177,20 +210,27 @@ def hetero_eval_calib(model, calib_loader, y_true_calib, max_age, device):
 def selection_score(select_by, val_mae, uq, mae_weight):
     """Lower-is-better score for checkpoint selection.
 
-    ``uq`` may be ``None`` on epochs where calib eval was skipped; in that
-    case only ``val_mae`` selection can produce a score.
+    Calculates the scoring metric to choose the best epoch checkpoint.
+    
+    Args:
+        select_by (str): Metric to use for checkpoint selection (e.g. combo).
+        val_mae (float): Mean Absolute Error on validation set.
+        uq (dict): Uncertainty metrics from hetero_eval_calib (or None if skipped).
+        mae_weight (float): Multiplier for point prediction error in combined score.
     """
     if select_by == "val_mae":
         return val_mae
     if uq is None:
         return None
     if select_by == "picp90":
+        # Target: PICP = 90% (minimize distance to 0.90)
         return abs(uq["picp90"] - 0.90)
     if select_by == "mpiw90":
+        # Target: Minimize mean interval width (narrower intervals = higher precision)
         return uq["mpiw90"]
     if select_by == "combo":
-        # Calibration already pins coverage; minimize calibrated width plus a
-        # small MAE penalty so point accuracy doesn't regress.
+        # Combined score: Minimize calibrated width (uq["mpiw90"]) while penalizing
+        # point accuracy degradation (uq["mae"]) to ensure model remains accurate.
         return uq["mpiw90"] + mae_weight * uq["mae"]
     raise ValueError(f"Unknown --select-by '{select_by}'")
 
@@ -265,6 +305,7 @@ def main():
 
     print("Starting training...")
     for epoch in range(epochs):
+        # --- TRAINING PHASE ---
         model.train()
         train_loss = 0.0
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
@@ -275,13 +316,19 @@ def main():
             targets = targets.to(device)
 
             try:
+                # 1. Forward pass outputs both predicted mean and log-variance
                 optimizer.zero_grad()
                 mean, log_var = model(img, sex)
+                
+                # 2. Compute the heteroscedastic loss (NLL + optional Smooth L1 on the mean)
                 loss = hetero_loss(targets, mean, log_var,
                                    mae_weight=args.mae_weight)
+                
+                # 3. Backpropagation and optimization step
                 loss.backward()
                 optimizer.step()
             except RuntimeError as exc:
+                # OOM recovery: fall back to CPU if GPU runs out of memory mid-epoch
                 if device.type != "cuda" or "out of memory" not in str(exc).lower():
                     raise
                 print("  warning: GPU OOM during training; switching to CPU.")
@@ -302,8 +349,13 @@ def main():
 
         train_loss /= len(train_loader.dataset)
 
+        # --- STANDARD VALIDATION PHASE ---
+        # Run standard validation to check point prediction MAE (dropout-off)
         val_mae = _eval_val_mae(model, val_loader, device, max_age)
 
+        # --- UQ-AWARE EVALUATION PHASE ---
+        # If selection criterion is UQ-aware, evaluate the prediction intervals
+        # on the calibration set every `calib_eval_every` epochs.
         run_calib = (args.select_by != "val_mae") and (
             (epoch + 1) % args.calib_eval_every == 0
         )
@@ -312,6 +364,7 @@ def main():
             uq = hetero_eval_calib(model, calib_loader, y_true_calib,
                                    max_age, device)
 
+        # Calculate selection score (lower is better)
         score = selection_score(args.select_by, val_mae, uq, args.mae_weight)
 
         current_lr = optimizer.param_groups[0]["lr"]
@@ -331,10 +384,10 @@ def main():
         history["calib_std_scale"].append(uq["std_scale"] if uq else None)
         history["score"].append(score)
 
-        # Scheduler tracks the same val MAE the base trainer uses, regardless
-        # of --select-by, so LR schedule is independent of UQ calibration noise.
+        # Step the learning rate scheduler based on point-prediction validation accuracy
         scheduler.step(val_mae)
 
+        # Save checkpoint if selection score improved
         if score is not None and score < best_score:
             new_path = run_dir / f"best_{run_name}_ep{epoch+1:02d}_score{score:.4f}.pth"
             print(f"  score improved {best_score:.4f} -> {score:.4f}, saving {new_path}")
@@ -344,6 +397,7 @@ def main():
             checkpoint_path = new_path
             torch.save(model.state_dict(), checkpoint_path)
 
+    # Restore the best epoch's weights for final calibration
     if checkpoint_path and checkpoint_path.exists():
         print(f"Restoring best weights from {checkpoint_path}")
         model.load_state_dict(torch.load(checkpoint_path))
@@ -353,9 +407,15 @@ def main():
         pickle.dump(history, f)
     print(f"Saved training history to {history_path}")
 
+    # --- FINAL TEMPERATURE CALIBRATION ---
+    # Fit the definitive temperature calibration multiplier on the calibration split.
+    # This scale factor adjusts the raw predicted log-variance outputs to align
+    # interval coverage with nominal expectations (e.g. 90% or 95%).
     print("Fitting final calibration on calib split...")
     final_uq = hetero_eval_calib(model, calib_loader, y_true_calib,
                                  max_age, device)
+    
+    # Save the calibration multiplier to a JSON file so run_hetero.py can reuse it
     cal_dir = method_results_dir(METHOD_NAME)
     cal_path = save_calibration(
         cal_dir, final_uq["std_scale"], split="calib", n=len(calib_df),

@@ -27,7 +27,14 @@ LOG_VAR_MAX = 4.0
 
 
 def clamp_log_var(log_var: torch.Tensor) -> torch.Tensor:
-    """Clamp ``log_var`` into a numerically safe range (see module docstring)."""
+    """Clamp ``log_var`` into a numerically safe range (see module docstring).
+
+    Clamping is crucial because:
+    - If log_var becomes too negative (variance -> 0), the inverse variance `exp(-log_var)`
+      approaches infinity, leading to exploding gradients during backpropagation.
+    - If log_var becomes too positive (variance -> infinity), training can collapse
+      as the loss function is minimized simply by predicting massive uncertainty.
+    """
     return torch.clamp(log_var, min=LOG_VAR_MIN, max=LOG_VAR_MAX)
 
 
@@ -35,11 +42,19 @@ def gaussian_nll_loss(y: torch.Tensor, mean: torch.Tensor,
                       log_var: torch.Tensor) -> torch.Tensor:
     """Mean Gaussian NLL for a heteroscedastic regression head.
 
-    All tensors must broadcast to the same shape (typically ``(B, 1)``).
-    ``log_var`` is clamped before use; see :data:`LOG_VAR_MIN` / :data:`LOG_VAR_MAX`.
+    Calculates the loss:
+        L = 0.5 * ( exp(-log_var) * (y - mean)^2 + log_var )
+    
+    This loss function achieves two goals:
+    1. `exp(-log_var) * (y - mean)^2`: Divides the squared residual error by the predicted
+       variance. For inputs where the model is highly uncertain, it predicts a larger variance
+       (larger log_var), which attenuates/reduces the impact of large prediction errors.
+    2. `log_var`: Serves as a penalty term. Without this term, the model could minimize
+       the loss by predicting infinite variance for every sample.
     """
     log_var = clamp_log_var(log_var)
-    inv_var = torch.exp(-log_var)
+    inv_var = torch.exp(-log_var)  # exp(-log_var) = 1 / var
+    # Up to a constant additive term, this is the negative log of a Gaussian density:
     return 0.5 * (inv_var * (y - mean) ** 2 + log_var).mean()
 
 
@@ -51,8 +66,18 @@ def hetero_loss(y: torch.Tensor, mean: torch.Tensor, log_var: torch.Tensor,
     positive value (e.g. 0.01) keeps the mean head close to a SmoothL1
     optimum, which protects point accuracy when NLL alone would let MAE
     drift in favour of a better-calibrated variance.
+    
+    Args:
+        y (Tensor): Ground truth normalized targets.
+        mean (Tensor): Predicted normalized means.
+        log_var (Tensor): Predicted log-variances.
+        mae_weight (float): Weight of the auxiliary Smooth L1 loss.
+        
+    Returns:
+        Tensor: Combined scalar loss.
     """
     nll = gaussian_nll_loss(y, mean, log_var)
     if mae_weight <= 0:
         return nll
+    # Add a point-prediction optimization penalty (Smooth L1) to stabilize the mean predictor
     return nll + mae_weight * F.smooth_l1_loss(mean, y)

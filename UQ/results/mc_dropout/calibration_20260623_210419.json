@@ -1,0 +1,12 @@
+{
+  "std_scale": 1.1325624269640648,
+  "split": "calib",
+  "n": 3153,
+  "timestamp": "20260623_210419",
+  "method": "mc_dropout",
+  "source": "uq_train",
+  "samples": 30,
+  "checkpoint": "best_uqtrain_seed123_ep14_score45.0340.pth",
+  "run_name": "uqtrain_seed123",
+  "dropout": 0.5
+}
