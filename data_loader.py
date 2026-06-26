@@ -85,7 +85,7 @@ def load_data(sample_frac=1.0, split_random_state=None):
 
     train_full = _read_source(DATA_DIR / "train.csv", "id", "boneage", "male", "train")
     test_df = _read_source(
-        DATA_DIR / "val.csv", "Image ID", "Bone Age (months)", "male", "val"
+        DATA_DIR / "test.csv", "Image ID", "Bone Age (months)", "male", "test"
     )
 
     if sample_frac < 1.0:
@@ -114,12 +114,12 @@ def load_data(sample_frac=1.0, split_random_state=None):
 
     return train_df, val_df, calib_df, test_df, max_age
 
-def build_datasets(train_df, val_df, batch_size=BATCH_SIZE):
+def build_datasets(train_df, val_df, batch_size=BATCH_SIZE, img_size=IMG_SIZE):
     """
     Converts pandas DataFrames into torch DataLoaders.
     """
     train_transform = transforms.Compose([
-        transforms.Resize(IMG_SIZE),
+        transforms.Resize(img_size),
         transforms.RandomRotation(20),
         transforms.RandomHorizontalFlip(),
         transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
@@ -129,7 +129,7 @@ def build_datasets(train_df, val_df, batch_size=BATCH_SIZE):
     ])
     
     val_transform = transforms.Compose([
-        transforms.Resize(IMG_SIZE),
+        transforms.Resize(img_size),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
@@ -145,13 +145,13 @@ def build_datasets(train_df, val_df, batch_size=BATCH_SIZE):
     return train_loader, val_loader
 
 
-def build_val_or_test_loader(df, batch_size=BATCH_SIZE):
+def build_val_or_test_loader(df, batch_size=BATCH_SIZE, img_size=IMG_SIZE):
     """
     Converts a single DataFrame (validation, calibration, or test) into a
     torch DataLoader with eval-time transforms and no shuffling.
     """
     eval_transform = transforms.Compose([
-        transforms.Resize(IMG_SIZE),
+        transforms.Resize(img_size),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])

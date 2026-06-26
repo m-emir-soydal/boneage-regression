@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 from config import OUTPUT_DIR
 from data_loader import load_data, build_datasets, build_val_or_test_loader
-from model import build_multi_input_model
+from model import build_multi_input_model, backbone_img_size
 from metrics import evaluate_and_save_metrics
 
 def main():
@@ -17,6 +17,9 @@ def main():
     parser.add_argument("--epochs", type=int, default=50, help="Number of epochs to train")
     parser.add_argument("--output-name", type=str, default="run", help="Prefix for output files")
     parser.add_argument("--seed", type=int, default=42, help="Torch init/training seed (data split stays fixed)")
+    parser.add_argument("--backbone", type=str, default="efficientnet_b3",
+                        choices=["efficientnet_b3", "vit_b_16"],
+                        help="Image feature backbone")
     args = parser.parse_args()
 
     # Seed torch only -> isolates model-init/training stochasticity.
@@ -26,7 +29,12 @@ def main():
 
     sample_frac = 0.01 if args.quick_test else 1.0
     epochs = 2 if args.quick_test else args.epochs
-    run_name = args.output_name + f"_seed{args.seed}" + ("_quicktest" if args.quick_test else "")
+    img_size = backbone_img_size(args.backbone)
+    run_name = (
+        args.output_name
+        + f"_{args.backbone}_seed{args.seed}"
+        + ("_quicktest" if args.quick_test else "")
+    )
 
     # All outputs for this run live under OUTPUT_DIR/<run_name>/
     run_dir = OUTPUT_DIR / run_name
@@ -41,13 +49,13 @@ def main():
           f"calibration {len(calib_df)} | test {len(test_df)}")
     
     print("Building PyTorch DataLoaders...")
-    train_loader, val_loader = build_datasets(train_df, val_df)
+    train_loader, val_loader = build_datasets(train_df, val_df, img_size=img_size)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    print("Building model...")
-    model = build_multi_input_model()
+    print(f"Building model (backbone={args.backbone})...")
+    model = build_multi_input_model(backbone=args.backbone)
     model = model.to(device)
     
     criterion = nn.SmoothL1Loss() # Huber / smooth L1 for training
@@ -168,7 +176,7 @@ def main():
     evaluate_and_save_metrics(model, val_loader, val_df, max_age, run_name=run_name, split="val", device=device)
     
     print("\nRunning evaluation on test set...")
-    test_loader = build_val_or_test_loader(test_df)
+    test_loader = build_val_or_test_loader(test_df, img_size=img_size)
     evaluate_and_save_metrics(model, test_loader, test_df, max_age, run_name=run_name, split="test", device=device)
     
     print("Training process completed.")

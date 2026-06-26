@@ -2,7 +2,8 @@ import torch
 from torch.utils.data import DataLoader
 from torchvision import transforms
 
-from config import BATCH_SIZE, IMG_SIZE
+import cps_config as C
+from config import BATCH_SIZE
 from data_loader import BoneAgeDataset
 
 
@@ -15,8 +16,9 @@ def _loader_options(device):
 
 
 def build_train_val_loaders(train_df, val_df, device, batch_size=BATCH_SIZE):
+    img_size = C.backbone_img_size()
     train_transform = transforms.Compose([
-        transforms.Resize(IMG_SIZE),
+        transforms.Resize(img_size),
         transforms.RandomRotation(20),
         transforms.RandomHorizontalFlip(),
         transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
@@ -26,7 +28,7 @@ def build_train_val_loaders(train_df, val_df, device, batch_size=BATCH_SIZE):
     ])
 
     eval_transform = transforms.Compose([
-        transforms.Resize(IMG_SIZE),
+        transforms.Resize(img_size),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
@@ -49,7 +51,7 @@ def build_train_val_loaders(train_df, val_df, device, batch_size=BATCH_SIZE):
 
 def build_eval_loader(df, device, batch_size=BATCH_SIZE):
     eval_transform = transforms.Compose([
-        transforms.Resize(IMG_SIZE),
+        transforms.Resize(C.backbone_img_size()),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])

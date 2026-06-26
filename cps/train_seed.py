@@ -33,7 +33,7 @@ def train_one_seed(seed):
     device = get_device()
     train_loader, val_loader = build_train_val_loaders(dfs["train"], dfs["val"], device)
 
-    model = build_multi_input_model().to(device)
+    model = build_multi_input_model(backbone=C.BACKBONE).to(device)
     criterion = nn.SmoothL1Loss()
     mae_metric = nn.L1Loss()
     optimizer = optim.Adam(model.parameters(), lr=1e-4)

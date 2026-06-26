@@ -20,11 +20,7 @@ def _predict_with_embeddings(model, loader, df, max_age, device):
             img = inputs["image_input"].to(device)
             sex = inputs["sex_input"].to(device)
 
-            img_feat = model.base_model(img)
-            sex_feat = model.relu(model.sex_fc(sex))
-            fused = torch.cat((img_feat, sex_feat), dim=1)
-            penultimate = model.relu(model.fc1(fused))
-            out = model.out(model.dropout(penultimate))
+            out, penultimate = model.forward_with_embedding(img, sex)
 
             preds.append(out.cpu().numpy())
             embeddings.append(penultimate.cpu().numpy())
@@ -49,7 +45,7 @@ def predict_one_seed(seed):
     dfs, max_age = load_seed_split(seed)
     device = get_device()
 
-    model = build_multi_input_model()
+    model = build_multi_input_model(backbone=C.BACKBONE)
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
     model = model.to(device)
 

@@ -16,11 +16,27 @@ if not DATA_ROOT.is_absolute():
     DATA_ROOT = (PROJECT_ROOT / DATA_ROOT).resolve()
 OUTPUT_ROOT = PROJECT_ROOT / "results" / "cps"
 
+# Image feature backbone used for both the point predictor and the embeddings
+# consumed by the conformal-prediction pipeline. The fusion head is identical
+# across backbones, so the 256-dim embedding stays comparable.
+# Override at runtime with the BACKBONE env var (used by cps.sh / run_comparison.sh)
+# so a single config file can drive every backbone without manual edits.
+BACKBONES = {
+    "efficientnet_b3": (300, 300),
+    "vit_b_16": (224, 224),
+    "inceptionnext_base": (224, 224),
+}
+BACKBONE = os.getenv("BACKBONE", "efficientnet_b3")
+if BACKBONE not in BACKBONES:
+    raise ValueError(f"Unknown BACKBONE '{BACKBONE}'. Known: {list(BACKBONES)}")
+# Backbones compared side by side by compare_backbones.py.
+COMPARE_BACKBONES = ["efficientnet_b3", "vit_b_16", "inceptionnext_base"]
+
 Y_MIN = 0.0
 Y_MAX = 240.0
 
-CONFIDENCES = [0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95]
-TABLE_CONFIDENCES = [0.80, 0.90, 0.95]
+CONFIDENCES = [0.40, 0.50, 0.60, 0.70, 0.85, 0.90, 0.95]
+TABLE_CONFIDENCES = [0.85, 0.90, 0.95]
 PLOT_CONFIDENCE = 0.95
 
 METHODS = ["scp", "knn_ncp", "as_mcp", "bcp"]
@@ -91,20 +107,39 @@ if RUN_MODE == "debug":
     SEEDS = DEBUG_SEEDS
     DATA_FRACTION = DEBUG_DATA_FRACTION
     EPOCHS = DEBUG_EPOCHS
-    RUN_OUTPUT_DIR = OUTPUT_ROOT / (RUN_TAG or "debug")
+    RUN_TAG_DIR = OUTPUT_ROOT / (RUN_TAG or "debug")
     DEVICE = DEBUG_DEVICE
 else:
     SEEDS = FULL_SEEDS
     DATA_FRACTION = FULL_DATA_FRACTION
     EPOCHS = FULL_EPOCHS
-    RUN_OUTPUT_DIR = OUTPUT_ROOT / (RUN_TAG or "full")
+    RUN_TAG_DIR = OUTPUT_ROOT / (RUN_TAG or "full")
     DEVICE = FULL_DEVICE
+
+# Outputs are scoped per backbone so EfficientNet and ViT runs do not collide.
+RUN_OUTPUT_DIR = RUN_TAG_DIR / BACKBONE
+
+
+def backbone_img_size(backbone=None):
+    """Return the (H, W) input size expected by the given backbone."""
+    name = BACKBONE if backbone is None else backbone
+    if name not in BACKBONES:
+        raise ValueError(f"Unknown backbone '{name}'. Known: {list(BACKBONES)}")
+    return BACKBONES[name]
+
+
+def comparison_dir():
+    """Directory for cross-backbone comparison artifacts (shared run tag)."""
+    return RUN_TAG_DIR / "comparison"
 
 
 def active_config_dict():
     return {
         "RUN_MODE": RUN_MODE,
         "RUN_TAG": RUN_TAG,
+        "BACKBONE": BACKBONE,
+        "BACKBONES": BACKBONES,
+        "COMPARE_BACKBONES": COMPARE_BACKBONES,
         "PROJECT_ROOT": str(PROJECT_ROOT),
         "DATA_ROOT": str(DATA_ROOT),
         "OUTPUT_ROOT": str(OUTPUT_ROOT),

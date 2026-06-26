@@ -5,6 +5,7 @@ seaborn
 Pillow
 torch
 torchvision
+timm
 tqdm
 scikit-learn
 python-dotenv
