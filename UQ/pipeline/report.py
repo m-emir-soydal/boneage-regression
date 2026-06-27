@@ -1,16 +1,18 @@
-"""Aggregate the pipeline outputs and build the comparison artifacts.
+"""Aggregate the pipeline outputs and build the report artifacts.
 
 Collects every ``comparison/<Method>/seed_XX/outputs/metrics.csv`` (BNN +
-MC-Dropout), merges them with the conformal ``metrics_long.csv`` (SCP / KNN-NCP
-/ AS-MCP) restricted to the same confidences and seeds, then writes:
+MC-Dropout) and writes both a combined report (both methods) and a separate
+self-contained report per method:
 
-    comparison/metrics_long.csv          all methods x seeds x confidences
+    comparison/metrics_long.csv          both methods x seeds x confidences
     comparison/metrics_summary.csv       mean/std over seeds per (method, conf)
     comparison/point_metrics_summary.csv MAE/RMSE/MedAE per method
     comparison/tables/*.csv / *.tex      main + full + point tables
     comparison/figures/*.png / *.pdf     reliability / PINAW / gap / ... plots
+    comparison/<Method>/report/...       the same set, that method only
 
-Can be run standalone after training:  ``python -m UQ.pipeline.report``.
+This pipeline does NOT read or merge any conformal results — that comparison is
+assembled separately. Can be run standalone:  ``python -m UQ.pipeline.report``.
 """
 from __future__ import annotations
 
@@ -232,26 +234,23 @@ def fig_picp_box(long_df, fig_dir, conf):
 
 
 # --------------------------------------------------------------------------- #
-# Entry point
+# Artifact writer (works on any subset of methods present in long_df)
 # --------------------------------------------------------------------------- #
-def build_report():
-    long_df = build_long()
-    if long_df.empty:
-        print("No metrics found. Run the training pipeline first.")
-        return None
-
-    C.OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-    tables_dir = C.OUTPUT_ROOT / "tables"
-    fig_dir = C.OUTPUT_ROOT / "figures"
+def _write_artifacts(long_df: pd.DataFrame, out_dir):
+    """Write metrics_long/summary + tables + figures for the methods in long_df."""
+    out_dir = Path(out_dir)
+    tables_dir = out_dir / "tables"
+    fig_dir = out_dir / "figures"
+    out_dir.mkdir(parents=True, exist_ok=True)
     tables_dir.mkdir(parents=True, exist_ok=True)
     fig_dir.mkdir(parents=True, exist_ok=True)
 
-    long_df.to_csv(C.OUTPUT_ROOT / "metrics_long.csv", index=False)
+    long_df.to_csv(out_dir / "metrics_long.csv", index=False)
 
     summary = build_summary(long_df)
-    summary.to_csv(C.OUTPUT_ROOT / "metrics_summary.csv", index=False)
+    summary.to_csv(out_dir / "metrics_summary.csv", index=False)
     point_summary = build_point_summary(long_df)
-    point_summary.to_csv(C.OUTPUT_ROOT / "point_metrics_summary.csv", index=False)
+    point_summary.to_csv(out_dir / "point_metrics_summary.csv", index=False)
 
     main_ms, main_mean = main_tables(summary)
     save_table(main_ms, tables_dir, "main_table_mean_std",
@@ -279,15 +278,39 @@ def build_report():
 
     meta = {
         "methods": _present(summary),
-        "seeds_uq": sorted(int(s) for s in long_df[long_df["family"] == "UQ"]["seed"].unique())
-        if "family" in long_df.columns else [],
+        "seeds": sorted(int(s) for s in long_df["seed"].unique()),
         "confidences": C.CONFIDENCES,
         "note": C.SPLIT_NOTE,
     }
-    (C.OUTPUT_ROOT / "report_meta.json").write_text(json.dumps(meta, indent=2),
-                                                    encoding="utf-8")
-    print(f"Report written to {C.OUTPUT_ROOT}")
+    (out_dir / "report_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    return summary, main_ms
+
+
+# --------------------------------------------------------------------------- #
+# Entry point
+# --------------------------------------------------------------------------- #
+def build_report():
+    long_df = build_long()
+    if long_df.empty:
+        print("No metrics found. Run the training pipeline first.")
+        return None
+
+    # 1) Combined report (both methods) at the comparison root.
+    _, main_ms = _write_artifacts(long_df, C.OUTPUT_ROOT)
+    print(f"Combined report -> {C.OUTPUT_ROOT}")
     print(main_ms.to_string(index=False))
+
+    # 2) A separate, self-contained report per method, inside its own folder
+    #    (next to that method's seed_XX folders).
+    for method in C.METHODS:
+        display = C.METHOD_DISPLAY_NAMES[method]
+        sub = long_df[long_df["method"] == display].copy()
+        if sub.empty:
+            continue
+        method_dir = C.OUTPUT_ROOT / display.replace(" ", "_") / "report"
+        _write_artifacts(sub, method_dir)
+        print(f"  {display} report -> {method_dir}")
+
     return long_df
 
 

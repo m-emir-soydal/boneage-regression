@@ -29,12 +29,6 @@ for _p in (str(PROJECT_ROOT), str(UQ_DIR)):
 # Run mode
 # --------------------------------------------------------------------------- #
 RUN_MODE = "full"          # "full" or "debug"
-RUN_TAG = "full_2"         # matches the conformal run tag we compare against
-
-# Conformal run for reference (the user assembles the BNN/MCD-vs-conformal
-# merge separately; this pipeline does not read it).
-CP_RUN_DIR = PROJECT_ROOT / "results" / "cps" / RUN_TAG
-CP_METRICS_LONG = CP_RUN_DIR / "conformal" / "metrics_long.csv"
 
 # All pipeline outputs live here:  UQ/comparison/<Method>/seed_XX/outputs/ ...
 OUTPUT_ROOT = UQ_DIR / "comparison"
@@ -56,8 +50,6 @@ PLOT_CONFIDENCE = 0.95
 # --------------------------------------------------------------------------- #
 METHODS = ["bnn", "mc_dropout"]
 METHOD_DISPLAY_NAMES = {"bnn": "BNN", "mc_dropout": "MC-Dropout"}
-# Conformal methods pulled into the joint comparison (BCP left out: fixed-width).
-CP_METHODS = ["SCP", "KNN-NCP", "AS-MCP"]
 
 # --------------------------------------------------------------------------- #
 # Seeds / data / epochs
@@ -121,10 +113,7 @@ def split_random_state(seed: int) -> int:
 def active_config_dict() -> dict:
     return {
         "RUN_MODE": RUN_MODE,
-        "RUN_TAG": RUN_TAG,
         "PROJECT_ROOT": str(PROJECT_ROOT),
-        "CP_RUN_DIR": str(CP_RUN_DIR),
-        "CP_METRICS_LONG": str(CP_METRICS_LONG),
         "OUTPUT_ROOT": str(OUTPUT_ROOT),
         "Y_MIN": Y_MIN,
         "Y_MAX": Y_MAX,
@@ -132,7 +121,6 @@ def active_config_dict() -> dict:
         "Z_SCORES": Z_SCORES,
         "METHODS": METHODS,
         "METHOD_DISPLAY_NAMES": METHOD_DISPLAY_NAMES,
-        "CP_METHODS": CP_METHODS,
         "SEEDS": SEEDS,
         "DATA_FRACTION": DATA_FRACTION,
         "EPOCHS": EPOCHS,

@@ -1,5 +1,5 @@
 """Run the fair BNN / MC-Dropout pipeline across all configured seeds, then
-build the comparison report against the conformal methods.
+build the per-method and combined reports (no conformal merge here).
 
 Usage
 -----
