@@ -23,3 +23,4 @@ data/
 # Notebooks (if any get added by mistake)
 .ipynb_checkpoints/
 /results
+/sweep_test/results
