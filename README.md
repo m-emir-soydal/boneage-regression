@@ -19,23 +19,44 @@ refactored/
 
 ## Methodology
 
+This project performs **Conformalized Quantile Regression (CQR)** for bone-age
+estimation: the network predicts a set of quantiles, and a held-out calibration
+split is used to conformalize the resulting intervals to a target coverage.
+
 ### Data Split & Preprocessing
-- **Dataset:** The dataset is split into **80% Training** and **20% Validation**.
-- **Stratification:** The split is stratified based on the `male` column (sex) to ensure gender balance across both sets.
-- **Image Preprocessing:** Images are resized to **300x300** and preprocessed using standard EfficientNet specific transformations.
-- **Normalization:** 
-  - The target variable (`boneage`) is normalized by dividing by the maximum age in the training set to stabilize regression.
-  - The `sex` input is represented as a numeric float (0.0 or 1.0).
+- **Dataset:** The source `train.csv` is split **50 / 25 / 12.5 / 12.5** into
+  `train` / `val` / `scale` / `cal`, stratified by the `male` column (sex). The
+  source `val.csv` is the held-out **TEST** set. `scale` is kept for layout
+  compatibility but is unused by CQR.
+- **Per-seed splits:** With `PER_SEED_SPLITS = True` (config), each seed gets its
+  own stratified partition (`random_state = seed`).
+- **Calibration:** `cal` is the conformal calibration split used to derive the
+  CQR correction `q_hat` per confidence level.
+- **Image Preprocessing:** Images are resized to **300x300** with standard
+  EfficientNet transforms.
+- **Normalization:** The target (`boneage`) is divided by the max age of the
+  training split; quantile regression and conformalization happen in this
+  normalized space and intervals are de-normalized to months for reporting.
 
 ### Model Architecture
-The problem is approached as a regression task using a multi-input architecture:
-1. **Image Branch:** An **EfficientNet-B3** base model (initialized with ImageNet weights, excluding top layers) extracts visual features, followed by a `GlobalAveragePooling2D` layer.
-2. **Tabular Branch:** The normalized `sex` input is explicitly passed as an auxiliary input.
-3. **Fusion & Prediction Head:** 
-   - The extracted image features and the sex feature are concatenated.
-   - The combined vector is passed through a `Dense` layer (256 units, ReLU activation) and a `Dropout` layer (rate: 0.5).
-   - Finally, a single-unit `Dense` layer (linear activation) outputs the predicted continuous bone age.
-4. **Optimization:** The model is optimized using **Adam** (learning rate: 1e-4) with **Mean Absolute Error (MAE)** as the primary loss function.
+A multi-input quantile-regression network:
+1. **Image Branch:** **EfficientNet-B3** (ImageNet weights) extracts visual features.
+2. **Tabular Branch:** The normalized `sex` input passes through a small dense layer.
+3. **Fusion & Quantile Head:** Image + sex features are concatenated, passed
+   through a `Linear(256) + ReLU + Dropout(0.5)` block, then a final
+   `Linear(n_quantiles)` head outputs one value per quantile level.
+4. **Confidence levels:** `CONFIDENCES = [0.85, 0.90, 0.95]` → quantiles
+   `[0.025, 0.05, 0.075, 0.5, 0.925, 0.95, 0.975]` (median included).
+5. **Optimization:** **Adam** (lr 1e-4) minimizing the **pinball (quantile)**
+   loss; the best checkpoint is selected on validation pinball loss.
+
+### Conformalization
+After training, on the `cal` split the conformity score
+`E = max(q_lo - y, y - q_hi)` is computed per confidence level, and
+`q_hat` is its `(1-α)(1 + 1/n)` empirical quantile. The calibrated interval is
+`[q_lo - q_hat, q_hi + q_hat]`, de-normalized and clipped to `[Y_MIN, Y_MAX]`.
+Reported metrics: median MAE/RMSE/R², plus per-level empirical coverage and
+mean interval width.
 
 ## Setup & Installation
 
@@ -76,8 +97,16 @@ To run the full training pipeline:
 
 ## Outputs
 
-After training, the script will generate the following in your `OUTPUT_DIR` (default: `outputs/`):
-- `best_<NAME>_XX-XXX.h5`: The best model checkpoint based on validation MAE.
-- `history_<NAME>.pkl`: Saved training metrics.
-- `<NAME>_val_predictions_<TIMESTAMP>.csv`: DataFrame with actual vs. predicted ages for the validation set.
-- `<NAME>_val_metrics_<TIMESTAMP>.csv`: Key metrics summary (MAE, MSE, RMSE, R², etc.).
+After training, the script generates the following under `OUTPUT_DIR/<NAME>/`:
+- `best_<NAME>_epXX_valX.XXXX.pth`: Best checkpoint by validation pinball loss.
+- `history_<NAME>.pkl`: Train/val pinball-loss history.
+- `q_hat_<NAME>.json`: CQR corrections per confidence level (normalized + months).
+- `<NAME>_<split>_predictions_<TS>.csv`: Per-sample median prediction plus
+  `lo_<c>` / `hi_<c>` / `covered_<c>` interval columns for each confidence.
+- `<NAME>_<split>_point_metrics_<TS>.csv`: MAE / RMSE / MSE / R² on the median.
+- `<NAME>_<split>_interval_metrics_<TS>.csv`: Coverage and mean width per level.
+
+To evaluate a checkpoint on TEST (re-calibrates on the matching seed's `cal` split):
+```bash
+python test.py --checkpoint <path.pth> --output-name run_v1 --seed <SEED>
+```

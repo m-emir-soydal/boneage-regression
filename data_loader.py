@@ -5,7 +5,7 @@ from torchvision import transforms
 from PIL import Image
 from pathlib import Path
 from sklearn.model_selection import train_test_split
-from config import DATA_DIR, IMG_SIZE, BATCH_SIZE, RANDOM_STATE
+from config import DATA_DIR, IMG_SIZE, BATCH_SIZE, RANDOM_STATE, PER_SEED_SPLITS
 
 class BoneAgeDataset(Dataset):
     def __init__(self, df, transform=None):
@@ -70,42 +70,52 @@ def _add_norm_cols(df, max_age):
     return df
 
 
-def load_data(sample_frac=1.0):
+def load_data(sample_frac=1.0, seed=RANDOM_STATE):
     """
     Loads the source train.csv + val.csv, unifies their schema, and splits
-    the source training data 50/25/25 into train/val/calibration. The source
-    validation set is used as the held-out TEST set.
+    the source training data 50/25/12.5/12.5 into train/val/scale/cal,
+    stratified by sex. The source validation set is the held-out TEST set.
+
+    `cal` is the conformal calibration set used by CQR; `scale` is kept (but
+    unused by CQR) so the split matches the cps pipeline layout.
+
+    When PER_SEED_SPLITS is True the split uses random_state=seed, so every
+    seed sees a different stratified partition. Otherwise the fixed
+    RANDOM_STATE split is reused for all seeds.
     """
+    split_state = seed if PER_SEED_SPLITS else RANDOM_STATE
+
     train_full = _read_source(DATA_DIR / "train.csv", "id", "boneage", "male", "train")
     test_df = _read_source(
         DATA_DIR / "val.csv", "Image ID", "Bone Age (months)", "male", "val"
     )
 
     if sample_frac < 1.0:
-        train_full = train_full.sample(frac=sample_frac, random_state=RANDOM_STATE)
+        train_full = train_full.sample(frac=sample_frac, random_state=split_state)
 
-    # 50 / 25 / 25 split, stratified by sex.
+    # 50 / 50, then 50 / 50, then 50 / 50  ->  50 / 25 / 12.5 / 12.5
     train_df, temp_df = train_test_split(
-        train_full,
-        test_size=0.5,
-        random_state=RANDOM_STATE,
+        train_full, test_size=0.5, random_state=split_state,
         stratify=train_full["male"],
     )
-    val_df, calib_df = train_test_split(
-        temp_df,
-        test_size=0.5,
-        random_state=RANDOM_STATE,
+    val_df, temp2_df = train_test_split(
+        temp_df, test_size=0.5, random_state=split_state,
         stratify=temp_df["male"],
+    )
+    scale_df, cal_df = train_test_split(
+        temp2_df, test_size=0.5, random_state=split_state,
+        stratify=temp2_df["male"],
     )
 
     # Normalize targets against the training split only.
     max_age = train_df["boneage"].max()
     train_df = _add_norm_cols(train_df, max_age)
     val_df = _add_norm_cols(val_df, max_age)
-    calib_df = _add_norm_cols(calib_df, max_age)
+    scale_df = _add_norm_cols(scale_df, max_age)
+    cal_df = _add_norm_cols(cal_df, max_age)
     test_df = _add_norm_cols(test_df, max_age)
 
-    return train_df, val_df, calib_df, test_df, max_age
+    return train_df, val_df, scale_df, cal_df, test_df, max_age
 
 def build_datasets(train_df, val_df, batch_size=BATCH_SIZE):
     """
