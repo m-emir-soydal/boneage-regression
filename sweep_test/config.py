@@ -15,6 +15,7 @@ SEEDS = list(range(20))
 CONFIDENCES = [0.40, 0.50, 0.60, 0.70, 0.85, 0.90, 0.95]
 TABLE_CONFIDENCES = [0.85, 0.90, 0.95]
 PLOT_CONFIDENCE = 0.95
+PLOT_CONFIDENCES = [0.85, 0.95]
 
 # Fractions are relative to the original source train.csv pool.
 # 0.075 means 7.5% of the original training source rows.
