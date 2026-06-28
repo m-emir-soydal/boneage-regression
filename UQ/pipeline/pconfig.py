@@ -68,8 +68,9 @@ PER_SEED_SPLITS = True
 SPLIT_RANDOM_STATE = 42      # used only if PER_SEED_SPLITS is False
 SPLIT_STRATIFY_COL = "male"
 SPLIT_NOTE = (
-    "per-seed stratified 50/25/25 split of train.csv (random_state=seed); "
-    "external test.csv is TEST — identical partition to the conformal run"
+    "per-seed stratified split of train.csv (random_state=seed): train 50 / "
+    "val 25 / calib 12.5 (conformal cal half; scale 12.5 dropped); external "
+    "test.csv is TEST — identical partition to the conformal run"
 )
 
 # --------------------------------------------------------------------------- #
@@ -81,8 +82,8 @@ BNN_PRIOR_SIGMA = 1.0
 BNN_KL_WEIGHT = 1.0
 SELECT_BY = "combo"          # UQ-aware checkpoint selection
 MAE_WEIGHT = 0.01
-MC_EVAL_SAMPLES = 10         # MC passes for per-epoch calib scoring
-MC_EVAL_EVERY = 1
+MC_EVAL_SAMPLES = 5          # MC passes for per-epoch calib scoring
+MC_EVAL_EVERY = 5            # score for checkpoint selection every N epochs
 FINAL_SAMPLES = 30           # MC passes for the definitive calib fit + test eval
 
 SAVE_MODELS = True           # keep model_best.pt per seed
