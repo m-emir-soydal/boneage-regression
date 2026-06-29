@@ -15,8 +15,8 @@ def main():
     parser = argparse.ArgumentParser(description="Train Multi-Input Bone Age Model with PyTorch")
     parser.add_argument("--quick-test", action="store_true", help="Run a quick test with 1% of data and 2 epochs")
     parser.add_argument("--epochs", type=int, default=50, help="Number of epochs to train")
-    parser.add_argument("--output-name", type=str, default="run", help="Prefix for output files")
-    parser.add_argument("--seed", type=int, default=42, help="Torch init/training seed (data split stays fixed)")
+    parser.add_argument("--seed", type=int, default=0, help="Torch init/training seed (data split stays fixed)")
+    parser.add_argument("--backbone", type=str, default="efficientnet_b3", help="Backbone to use")
     args = parser.parse_args()
 
     # Seed torch only -> isolates model-init/training stochasticity.
@@ -26,28 +26,29 @@ def main():
 
     sample_frac = 0.01 if args.quick_test else 1.0
     epochs = 2 if args.quick_test else args.epochs
-    run_name = args.output_name + f"_seed{args.seed}" + ("_quicktest" if args.quick_test else "")
+    backbone_name = args.backbone
+    run_name = f"seed{args.seed}" + ("_quicktest" if args.quick_test else "")
 
     # All outputs for this run live under OUTPUT_DIR/<run_name>/
-    run_dir = OUTPUT_DIR / run_name
+    run_dir = OUTPUT_DIR / backbone_name / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Starting run: {run_name}")
+    print(f"[Backbone: {backbone_name}] Starting run: {run_name}")
     print(f"Using {sample_frac*100}% of data for {epochs} epochs.")
 
     print("Loading data...")
-    train_df, val_df, calib_df, test_df, max_age = load_data(sample_frac=sample_frac)
+    train_df, val_df, calib_df, test_df, max_age = load_data(sample_frac=sample_frac, seed=args.seed)
     print(f"Splits -> train {len(train_df)} | val {len(val_df)} | "
           f"calibration {len(calib_df)} | test {len(test_df)}")
     
     print("Building PyTorch DataLoaders...")
-    train_loader, val_loader = build_datasets(train_df, val_df)
+    train_loader, val_loader = build_datasets(train_df, val_df, backbone_name=backbone_name)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
     print("Building model...")
-    model = build_multi_input_model()
+    model = build_multi_input_model(name=backbone_name)
     model = model.to(device)
     
     criterion = nn.SmoothL1Loss() # Huber / smooth L1 for training
@@ -115,7 +116,7 @@ def main():
         
         # Model Checkpointing
         if val_loss < best_val_mae:
-            new_checkpoint_path = run_dir / f"best_{run_name}_ep{epoch+1:02d}_val{val_loss:.3f}.pth"
+            new_checkpoint_path = run_dir / f"best_model.pth"
             print(f"val_loss improved from {best_val_mae:.4f} to {val_loss:.4f}, saving model to {new_checkpoint_path}")
             best_val_mae = val_loss
             
@@ -136,7 +137,7 @@ def main():
         print(f"Restoring model weights from {checkpoint_path}")
         model.load_state_dict(torch.load(checkpoint_path))
 
-    history_path = run_dir / f"history_{run_name}.pkl"
+    history_path = run_dir / f"history.pkl"
     with open(history_path, 'wb') as f:
         pickle.dump(history, f)
     print(f"Saved training history to {history_path}")
@@ -157,7 +158,7 @@ def main():
         plt.legend(fontsize=12)
         plt.grid(True, linestyle='--', alpha=0.7)
         
-        plot_path = run_dir / f"loss_plot_{run_name}.png"
+        plot_path = run_dir / f"loss_plot.png"
         plt.tight_layout()
         plt.savefig(plot_path, dpi=300)
         plt.close()
@@ -165,11 +166,11 @@ def main():
     except ImportError:
         print("matplotlib or seaborn not installed, skipping plot generation.")
 
-    evaluate_and_save_metrics(model, val_loader, val_df, max_age, run_name=run_name, split="val", device=device)
+    evaluate_and_save_metrics(model, val_loader, val_df, max_age, run_dir, seed=args.seed, split="val", device=device)
     
     print("\nRunning evaluation on test set...")
-    test_loader = build_val_or_test_loader(test_df)
-    evaluate_and_save_metrics(model, test_loader, test_df, max_age, run_name=run_name, split="test", device=device)
+    test_loader = build_val_or_test_loader(test_df, backbone_name=backbone_name)
+    evaluate_and_save_metrics(model, test_loader, test_df, max_age, run_dir, seed=args.seed, split="test", device=device)
     
     print("Training process completed.")
 

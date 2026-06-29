@@ -1,21 +1,34 @@
 import torch
 import torch.nn as nn
-from torchvision.models import efficientnet_b3, EfficientNet_B3_Weights
+from torchvision.models import (
+    efficientnet_b3, EfficientNet_B3_Weights,
+    vit_b_16, ViT_B_16_Weights,
+    convnext_tiny, ConvNeXt_Tiny_Weights,
+)
+
 
 class MultiInputModel(nn.Module):
-    def __init__(self, dropout=0.5):
+    def __init__(self, dropout=0.5,name="efficientnet_b3"):
         super().__init__()
         
         # Load pre-trained EfficientNetB3
-        weights = EfficientNet_B3_Weights.IMAGENET1K_V1
-        self.base_model = efficientnet_b3(weights=weights)
-        
-        # Extract the in_features of the classifier
-        num_ftrs = self.base_model.classifier[1].in_features
-        
-        # Remove the classifier so base_model returns features
-        self.base_model.classifier = nn.Identity()
-        
+        if name == "efficientnet_b3":
+            backbone = efficientnet_b3(weights=EfficientNet_B3_Weights.IMAGENET1K_V1)
+            num_ftrs = backbone.classifier[1].in_features
+            backbone.classifier = nn.Identity()
+        elif name == "vit_b16":
+            backbone = vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1)
+            num_ftrs = backbone.heads.head.in_features  # 768
+            backbone.heads = nn.Identity()
+        elif name == "convnext_tiny":
+            backbone = convnext_tiny(weights=ConvNeXt_Tiny_Weights.IMAGENET1K_V1)
+            num_ftrs = backbone.classifier[2].in_features  # 768
+            backbone.classifier[2] = nn.Identity()
+        else:
+            raise ValueError(f"Unknown backbone: {name!r}")
+
+        self.base_model = backbone
+
         # Dense layer for sex input
         self.sex_fc = nn.Linear(1, 32)
 
@@ -42,11 +55,11 @@ class MultiInputModel(nn.Module):
         
         return out
 
-def build_multi_input_model(dropout=0.5, learning_rate=1e-4):
+def build_multi_input_model(dropout=0.5, learning_rate=1e-4, name="efficientnet_b3"):
     """
     Returns the PyTorch multi-input model.
     Note: learning_rate is handled in the optimizer in PyTorch,
     but we keep the signature compatible.
     """
-    model = MultiInputModel(dropout=dropout)
+    model = MultiInputModel(dropout=dropout,name=name)
     return model

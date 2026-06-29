@@ -1,6 +1,18 @@
 """
 *****************************************************
 * Author: Nadide Bilge Dogan                        *
+* Date: 29/06/2026                                  *
+* Version: 1.7.0                                    *
+* Branch: bilge                                     *
+* Development:                                      *
+* - 10 seed and split.                              *
+* - Added 3 different backbone architectures.       *
+* - Edit output structure.                          *
+*****************************************************
+"""
+"""
+*****************************************************
+* Author: Nadide Bilge Dogan                        *
 * Date: 18/06/2026                                  *
 * Version: 1.6.0                                    *
 * Branch: bilge                                     *
@@ -17,6 +29,7 @@
 * Development:                                      *
 * - Epoch size changed to 50.                       *
 * - Early stopping step set to 5.                   *
+* - Update README.md                                *
 *****************************************************
 """
 """

@@ -1,40 +1,37 @@
 #!/bin/bash
-# run_training.sh
-# Script to easily launch the training process.
+# Runs the training process for multiple seeds.
+# efficientnet_b3, vit_b16, convnext_tiny
 
-# Default values
-CONDA_ENV="uq"
+BACKBONE="efficientnet_b3"
+SEEDS=(0 1 2 3 4 5 6 7 8 9)
+
 QUICK_TEST=0
-OUTPUT_NAME="run"
-SEED=123
-
-# Parse arguments
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --quick-test) QUICK_TEST=1; shift ;;
-        --output-name) OUTPUT_NAME="$2"; shift 2 ;;
-        --env) CONDA_ENV="$2"; shift 2 ;;
-        --seed) SEED="$2"; shift 2 ;;
+        --backbone) BACKBONE="$2"; shift 2 ;;
         *) echo "Unknown parameter passed: $1"; exit 1 ;;
     esac
 done
 
-# Initialize conda if needed, and activate environment
-# This allows using "conda activate" inside the shell script
-eval "$(conda shell.bash hook)"
-conda activate "$CONDA_ENV"
 
-# Check if environment activation was successful
-if [ $? -ne 0 ]; then
-    echo "Failed to activate Conda environment '$CONDA_ENV'. Please verify it exists."
-    exit 1
-fi
+for SEED in "${SEEDS[@]}"; do
+    echo ""
+    echo "=== backbone=$BACKBONE seed=$SEED ==="
 
-# Build python command
-PYTHON_CMD="python train.py --output-name $OUTPUT_NAME --seed $SEED"
-if [ "$QUICK_TEST" -eq 1 ]; then
-    PYTHON_CMD="$PYTHON_CMD --quick-test"
-fi
+    PYTHON_CMD="python train.py --seed $SEED --backbone $BACKBONE"
+    if [ "$QUICK_TEST" -eq 1 ]; then
+        PYTHON_CMD="$PYTHON_CMD --quick-test"
+    fi
 
-echo "Running: $PYTHON_CMD"
-eval "$PYTHON_CMD"
+    eval "$PYTHON_CMD"
+
+    if [ $? -ne 0 ]; then
+        echo "ERROR: backbone=$BACKBONE seed=$SEED failed. Aborting."
+        exit 1
+    fi
+done
+
+
+echo ""
+echo "All $TOTAL runs completed."
